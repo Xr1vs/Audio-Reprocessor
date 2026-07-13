@@ -543,21 +543,25 @@ async function ensureEngine(){
   ffmpeg.on('log', ({message})=>{ window.__lastFF = (window.__lastFF||'') + message + '\n'; });
 
   const coreBase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
-  const ffBase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm';
 
-  const parts = { core:0, wasm:0, worker:0 };
-  const weight = { core:0.1, wasm:0.85, worker:0.05 };
-  function overall(){ return parts.core*weight.core + parts.wasm*weight.wasm + parts.worker*weight.worker; }
+  // NOTE: we deliberately do NOT fetch/blob our own classWorkerURL here.
+  // @ffmpeg/ffmpeg's worker.js is an ES module with relative imports
+  // (./const.js, ./errors.js) — converting it to a blob: URL strips its
+  // base path, so those relative imports fail to resolve and the worker
+  // never comes up, which makes ffmpeg.load() hang indefinitely. Since
+  // FFmpeg itself is imported straight from the CDN (not blobbed), it can
+  // construct its own worker relative to itself just fine — that's all
+  // the single-thread core needs.
+  const parts = { core:0, wasm:0 };
+  const weight = { core:0.1, wasm:0.9 };
+  function overall(){ return parts.core*weight.core + parts.wasm*weight.wasm; }
   function bump(){ const p = Math.min(1, overall()); setBar('engineBar', p); document.getElementById('engineTxt').textContent = Math.round(p*100)+'%'; }
 
-  // Fetch all three files in parallel instead of one-at-a-time — this alone
-  // roughly cuts cold-load time to the length of the slowest single request
-  // instead of the sum of all three.
-  const [coreBlob, wasmBlob, workerBlob] = await withTimeout(
+  // Fetch core + wasm in parallel instead of one-at-a-time.
+  const [coreBlob, wasmBlob] = await withTimeout(
     Promise.all([
       fetchWithProgress(`${coreBase}/ffmpeg-core.js`, r=>{parts.core=r; bump();}),
       fetchWithProgress(`${coreBase}/ffmpeg-core.wasm`, r=>{parts.wasm=r; bump();}),
-      fetchWithProgress(`${ffBase}/worker.js`, r=>{parts.worker=r; bump();}),
     ]),
     45000,
     'Engine download'
@@ -566,7 +570,6 @@ async function ensureEngine(){
   await withTimeout(ffmpeg.load({
     coreURL: URL.createObjectURL(new Blob([coreBlob], {type:'text/javascript'})),
     wasmURL: URL.createObjectURL(new Blob([wasmBlob], {type:'application/wasm'})),
-    classWorkerURL: URL.createObjectURL(new Blob([workerBlob], {type:'text/javascript'})),
   }), 20000, 'Engine initialization');
 
   ffmpegReady = true;
