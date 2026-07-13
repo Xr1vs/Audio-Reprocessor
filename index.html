@@ -535,6 +535,52 @@ function withTimeout(promise, ms, label){
   return Promise.race([promise, timeout]).finally(()=> clearTimeout(timer));
 }
 
+// Fetches a small text file through the same engine cache used for the
+// core/wasm blobs, so repeat loads don't re-fetch it.
+async function fetchCachedText(url){
+  let cache = null;
+  try{ cache = await caches.open(ENGINE_CACHE); }catch(e){ /* ignore */ }
+  if(cache){
+    const cached = await cache.match(url);
+    if(cached) return await cached.text();
+  }
+  const res = await fetch(url);
+  if(!res.ok) throw new Error(`Failed to fetch ${url} (${res.status})`);
+  const text = await res.text();
+  if(cache){
+    try{ await cache.put(url, new Response(text)); }catch(e){ /* ignore */ }
+  }
+  return text;
+}
+
+// Builds a self-contained worker script with zero external references.
+// @ffmpeg/ffmpeg's worker.js is an ES module that statically imports
+// './const.js' and './errors.js'. Two problems stack on top of each other
+// if you try to use it straight from a CDN:
+//   1) Browsers refuse to construct a Worker from a cross-origin script URL
+//      at all — that restriction is stricter than fetch's CORS rules, no
+//      response header fixes it ("cannot be accessed from origin ...").
+//   2) Blobbing worker.js by itself dodges #1 but breaks its relative
+//      imports, since a blob: URL has no base path for them to resolve
+//      against — the worker then fails to come up and ffmpeg.load() hangs
+//      with no error at all.
+// Fetching all three files and inlining const.js/errors.js's exports as
+// plain top-level declarations (stripping import/export syntax) produces
+// one flat script with no external references, so it works fine as a
+// blob: URL worker regardless of the page's origin.
+async function buildInlinedWorkerBlobURL(ffBase){
+  const [workerSrc, constSrc, errorsSrc] = await Promise.all([
+    fetchCachedText(`${ffBase}/worker.js`),
+    fetchCachedText(`${ffBase}/const.js`),
+    fetchCachedText(`${ffBase}/errors.js`),
+  ]);
+  const inlinedConst = constSrc.replace(/^export\s+/gm, '');
+  const inlinedErrors = errorsSrc.replace(/^export\s+/gm, '');
+  const inlinedWorker = workerSrc.replace(/^import\s*\{[^}]*\}\s*from\s*["'][^"']+["'];?\s*$/gm, '');
+  const combined = `${inlinedConst}\n${inlinedErrors}\n${inlinedWorker}`;
+  return URL.createObjectURL(new Blob([combined], {type:'text/javascript'}));
+}
+
 async function ensureEngine(){
   if(ffmpegReady) return;
   document.getElementById('engineTxt').textContent = '0%';
@@ -543,25 +589,22 @@ async function ensureEngine(){
   ffmpeg.on('log', ({message})=>{ window.__lastFF = (window.__lastFF||'') + message + '\n'; });
 
   const coreBase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm';
+  const ffBase = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm';
 
-  // NOTE: we deliberately do NOT fetch/blob our own classWorkerURL here.
-  // @ffmpeg/ffmpeg's worker.js is an ES module with relative imports
-  // (./const.js, ./errors.js) — converting it to a blob: URL strips its
-  // base path, so those relative imports fail to resolve and the worker
-  // never comes up, which makes ffmpeg.load() hang indefinitely. Since
-  // FFmpeg itself is imported straight from the CDN (not blobbed), it can
-  // construct its own worker relative to itself just fine — that's all
-  // the single-thread core needs.
   const parts = { core:0, wasm:0 };
-  const weight = { core:0.1, wasm:0.9 };
+  const weight = { core:0.15, wasm:0.85 };
   function overall(){ return parts.core*weight.core + parts.wasm*weight.wasm; }
   function bump(){ const p = Math.min(1, overall()); setBar('engineBar', p); document.getElementById('engineTxt').textContent = Math.round(p*100)+'%'; }
 
-  // Fetch core + wasm in parallel instead of one-at-a-time.
-  const [coreBlob, wasmBlob] = await withTimeout(
+  // Fetch core + wasm (parallel) and the tiny worker source files (parallel)
+  // together — the worker files are a few KB and don't need progress UI.
+  const [[coreBlob, wasmBlob], workerBlobURL] = await withTimeout(
     Promise.all([
-      fetchWithProgress(`${coreBase}/ffmpeg-core.js`, r=>{parts.core=r; bump();}),
-      fetchWithProgress(`${coreBase}/ffmpeg-core.wasm`, r=>{parts.wasm=r; bump();}),
+      Promise.all([
+        fetchWithProgress(`${coreBase}/ffmpeg-core.js`, r=>{parts.core=r; bump();}),
+        fetchWithProgress(`${coreBase}/ffmpeg-core.wasm`, r=>{parts.wasm=r; bump();}),
+      ]),
+      buildInlinedWorkerBlobURL(ffBase),
     ]),
     45000,
     'Engine download'
@@ -570,6 +613,7 @@ async function ensureEngine(){
   await withTimeout(ffmpeg.load({
     coreURL: URL.createObjectURL(new Blob([coreBlob], {type:'text/javascript'})),
     wasmURL: URL.createObjectURL(new Blob([wasmBlob], {type:'application/wasm'})),
+    classWorkerURL: workerBlobURL,
   }), 20000, 'Engine initialization');
 
   ffmpegReady = true;
