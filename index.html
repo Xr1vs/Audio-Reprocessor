@@ -1198,13 +1198,7 @@ function updateChunkSizeNote(){
   const fmt = document.getElementById('fmtSel').value;
   const bitrateKbps = {ogg_hq:384, ogg_std:256, ogg:256, mp3:190, wav:1411}[fmt] ?? 256;
   const splitMin = parseFloat(splitMinEl.value) || 0;
-  // Encoded (on-disk) duration per chunk. The exported file is pitch/speed
-  // -shifted DOWN by PLAYBACK_SPEED (that's the whole point of the asetrate
-  // trick), which makes it LONGER on disk than what you actually hear once
-  // Roblox's Sound.PlaybackSpeed speeds it back up. So to land on
-  // `splitMin` minutes as heard in Roblox, the on-disk chunk has to be
-  // `splitMin * PLAYBACK_SPEED` minutes long, not divided.
-  const encodedSecs = (splitMin*60) * PLAYBACK_SPEED; // actual on-disk duration per chunk
+  const encodedSecs = (splitMin*60) / PLAYBACK_SPEED; // actual on-disk duration per chunk
   const estMB = (bitrateKbps*1000/8 * encodedSecs) / (1024*1024);
   const VERCEL_LIMIT_MB = 4.5;
   if(!splitOn){ note.textContent = ''; return; }
@@ -1429,18 +1423,15 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
     // up to 3 in a row on "max") is a classic way to create "musical noise" —
     // a warbly, static-like artifact that's actually introduced by the
     // over-processing itself, not removed by it.
-    const nrMap = {off:'afftdn=nr=8:nf=-35:nt=w:om=o', light:'afftdn=nr=14:nf=-42:nt=w:om=o', medium:'afftdn=nr=22:nf=-48:nt=w:om=o', strong:'afftdn=nr=30:nf=-52:nt=w:om=o', max:'afftdn=nr=48:nf=-62:nt=w:om=o'};
+    const nrMap = {off:'afftdn=nr=8:nf=-35:nt=w:om=o', light:'afftdn=nr=14:nf=-42:nt=w:om=o', medium:'afftdn=nr=22:nf=-48:nt=w:om=o', strong:'afftdn=nr=30:nf=-52:nt=w:om=o', max:'afftdn=nr=44:nf=-60:nt=w:om=o'};
     filters.push(nrMap[noiseReduction]);
-    const anlm = {off:0.0003, light:0.0004, medium:0.0010, strong:0.0018, max:0.0046}[noiseReduction];
+    const anlm = {off:0.0003, light:0.0004, medium:0.0010, strong:0.0018, max:0.0040}[noiseReduction];
     filters.push(`anlmdn=s=${anlm}:p=0.002:r=0.004:m=15`);
     if(noiseReduction==='medium'||noiseReduction==='strong'||noiseReduction==='max') filters.push('equalizer=f=10000:t=h:w=0.5:g=1.5');
     // Extra de-hiss high-shelf trim, only on max — takes a bit more off the
     // very top of the band (above most vocal/instrument content) where
     // residual hiss/static tends to live after the afftdn/anlmdn passes.
-    // Slightly deeper cut + a second, lower-frequency shelf than before to
-    // chase down static that survives into the mids on noisy live recordings —
-    // still a single extra shelf stage each, not another full denoise pass.
-    if(noiseReduction==='max'){ filters.push('equalizer=f=11000:t=h:w=0.7:g=-7'); filters.push('equalizer=f=8000:t=h:w=0.6:g=-2.5'); }
+    if(noiseReduction==='max') filters.push('equalizer=f=12000:t=h:w=0.7:g=-6');
     filters.push('lowpass=f=16000:poles=2', 'lowpass=f=15000:poles=2');
     // Gentler than before, and only when actually asked to reduce noise —
     // a tight gate on already-denoised audio is prone to audible chatter.
@@ -1450,11 +1441,11 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
     filters.push('alimiter=level_in=1:level_out=1:limit=0.95:attack=1:release=50:level=disabled');
     filters.push('highpass=f=20', 'lowpass=f=16000:poles=2', 'lowpass=f=15000:poles=2');
     if(noiseReduction !== 'off'){
-      const nrMap = {light:'afftdn=nr=10:nf=-38:nt=w:om=o', medium:'afftdn=nr=16:nf=-44:nt=w:om=o', strong:'afftdn=nr=22:nf=-48:nt=w:om=o', max:'afftdn=nr=34:nf=-58:nt=w:om=o'};
+      const nrMap = {light:'afftdn=nr=10:nf=-38:nt=w:om=o', medium:'afftdn=nr=16:nf=-44:nt=w:om=o', strong:'afftdn=nr=22:nf=-48:nt=w:om=o', max:'afftdn=nr=32:nf=-55:nt=w:om=o'};
       filters.push(nrMap[noiseReduction]);
-      const s2 = {light:0.0004, medium:0.0007, strong:0.0012, max:0.0025}[noiseReduction];
+      const s2 = {light:0.0004, medium:0.0007, strong:0.0012, max:0.0022}[noiseReduction];
       filters.push(`anlmdn=s=${s2}:p=0.002:r=0.004:m=15`);
-      if(noiseReduction==='max'){ filters.push('equalizer=f=12000:t=h:w=0.7:g=-5'); filters.push('equalizer=f=8500:t=h:w=0.6:g=-2'); }
+      if(noiseReduction==='max') filters.push('equalizer=f=13000:t=h:w=0.7:g=-4');
     }
     filters.push(`asetrate=${lowRate}`, 'aresample=44100:resampler=swr:filter_size=512:cutoff=0.93:precision=28');
     filters.push('agate=threshold=0.00316:attack=20:release=250:ratio=10:makeup=1');
@@ -1604,7 +1595,7 @@ async function processOne(file, idx, total, opts){
   }
 
   const fullDur = cumulativeEncodedStart;
-  log(`   Duration on disk: ${fmtTime(fullDur)} (plays as ${fmtTime(fullDur/PLAYBACK_SPEED)} in Roblox)`, 'info');
+  log(`   Duration on disk: ${fmtTime(fullDur)} (plays as ${fmtTime(fullDur*PLAYBACK_SPEED)} in Roblox)`, 'info');
 
   // QC peak-level check, sampled from the first segment only — cheap, and a
   // representative read without needing the full show assembled anywhere.
@@ -1668,16 +1659,7 @@ async function processOne(file, idx, total, opts){
   }
 
   if(opts.split){
-    // chunkSecs is in the ENCODED (on-disk) time domain, same as fullDur and
-    // segMeta above. The exported audio is slowed down by PLAYBACK_SPEED
-    // (that's the pitch-shift trick), so it takes PLAYBACK_SPEED times LONGER
-    // on disk to produce `splitMin` minutes once Roblox speeds it back up.
-    // (Previously this divided by PLAYBACK_SPEED instead of multiplying,
-    // which made every chunk ~8.65x too short in Roblox-time and produced
-    // far more, much-shorter parts than intended — the more chunks in a
-    // batch, the more chances for one to fail/skip, which is why long
-    // concert sets were coming out short several minutes overall.)
-    const chunkSecs = (opts.splitMin*60) * PLAYBACK_SPEED;
+    const chunkSecs = (opts.splitMin*60) / PLAYBACK_SPEED;
     const numChunks = Math.max(1, Math.ceil(fullDur / chunkSecs));
     log(`Splitting into ${numChunks} chunk(s) of ${opts.splitMin} min (Roblox time) each…`, 'header');
     const failedChunks = [];
@@ -1690,7 +1672,7 @@ async function processOne(file, idx, total, opts){
         await extractRange(outName, start, dur);
         const data = await ffmpeg.readFile(outName);
         outputs.push({name: outName, blob: new Blob([data.buffer], {type:'audio/'+ext})});
-        log(`   ${outName} ✓ (${fmtTime(dur)} on disk → ${fmtTime(dur/PLAYBACK_SPEED)} in Roblox)`, 'good');
+        log(`   ${outName} ✓ (${fmtTime(dur)} on disk → ${fmtTime(dur*PLAYBACK_SPEED)} in Roblox)`, 'good');
         if(opts.autoUpload) queueAutoUpload(outputs[outputs.length-1]);
       }catch(err){
         log(`   ${outName} FAILED: ${err.message} — skipping this chunk and continuing with the rest.`, 'critical');
@@ -1707,11 +1689,6 @@ async function processOne(file, idx, total, opts){
         `re-running just this file (or lowering chunk length) may help if it was a memory hiccup.`, 'warning');
     }
     await freeSegmentsBefore(segMeta.length);
-    const coveredEncoded = Math.min(numChunks*chunkSecs, fullDur) - (failedChunks.length * chunkSecs);
-    const missingRoblox = (fullDur/PLAYBACK_SPEED) - (coveredEncoded/PLAYBACK_SPEED);
-    if(failedChunks.length && missingRoblox > 1){
-      log(`   Roughly ${fmtTime(Math.max(0,missingRoblox))} of Roblox-time is missing from the ${failedChunks.length} failed chunk(s) above.`, 'warning');
-    }
   } else {
     // Single-file output: concat all segments straight into the target
     // codec in one pass (no separate giant lossless intermediate written to
