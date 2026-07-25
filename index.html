@@ -1198,7 +1198,7 @@ function updateChunkSizeNote(){
   const fmt = document.getElementById('fmtSel').value;
   const bitrateKbps = {ogg_hq:384, ogg_std:256, ogg:256, mp3:190, wav:1411}[fmt] ?? 256;
   const splitMin = parseFloat(splitMinEl.value) || 0;
-  const encodedSecs = (splitMin*60) / PLAYBACK_SPEED; // actual on-disk duration per chunk
+  const encodedSecs = (splitMin*60) * PLAYBACK_SPEED; // actual on-disk duration per chunk
   const estMB = (bitrateKbps*1000/8 * encodedSecs) / (1024*1024);
   const VERCEL_LIMIT_MB = 4.5;
   if(!splitOn){ note.textContent = ''; return; }
@@ -1595,7 +1595,7 @@ async function processOne(file, idx, total, opts){
   }
 
   const fullDur = cumulativeEncodedStart;
-  log(`   Duration on disk: ${fmtTime(fullDur)} (plays as ${fmtTime(fullDur*PLAYBACK_SPEED)} in Roblox)`, 'info');
+  log(`   Duration on disk: ${fmtTime(fullDur)} (plays as ${fmtTime(fullDur/PLAYBACK_SPEED)} in Roblox)`, 'info');
 
   // QC peak-level check, sampled from the first segment only — cheap, and a
   // representative read without needing the full show assembled anywhere.
@@ -1659,7 +1659,7 @@ async function processOne(file, idx, total, opts){
   }
 
   if(opts.split){
-    const chunkSecs = (opts.splitMin*60) / PLAYBACK_SPEED;
+    const chunkSecs = (opts.splitMin*60) * PLAYBACK_SPEED;
     const numChunks = Math.max(1, Math.ceil(fullDur / chunkSecs));
     log(`Splitting into ${numChunks} chunk(s) of ${opts.splitMin} min (Roblox time) each…`, 'header');
     const failedChunks = [];
@@ -1672,7 +1672,7 @@ async function processOne(file, idx, total, opts){
         await extractRange(outName, start, dur);
         const data = await ffmpeg.readFile(outName);
         outputs.push({name: outName, blob: new Blob([data.buffer], {type:'audio/'+ext})});
-        log(`   ${outName} ✓ (${fmtTime(dur)} on disk → ${fmtTime(dur*PLAYBACK_SPEED)} in Roblox)`, 'good');
+        log(`   ${outName} ✓ (${fmtTime(dur)} on disk → ${fmtTime(dur/PLAYBACK_SPEED)} in Roblox)`, 'good');
         if(opts.autoUpload) queueAutoUpload(outputs[outputs.length-1]);
       }catch(err){
         log(`   ${outName} FAILED: ${err.message} — skipping this chunk and continuing with the rest.`, 'critical');
