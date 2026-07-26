@@ -438,26 +438,6 @@
     </div>
 
     <div class="panel">
-      <h3>Audio Permissions</h3>
-      <div class="settings-note">
-        This grants a Roblox account permission to actually <b>use</b> your uploaded audio in their own
-        games — Roblox's real asset-permission system, separate from the Show-Control Whitelist below.
-        The typical case: you uploaded from an alt account, and your main account (or someone else's)
-        needs to be able to insert these audio IDs into their own place. Whoever's connected/API key is
-        used here needs to own the assets being shared.
-      </div>
-      <div class="grid" style="margin-top:10px;">
-        <div class="field" style="grid-column: span 2;">
-          <label>Roblox username to grant access to</label>
-          <input type="text" id="permGrantNameInp" placeholder="RobloxUsername" autocomplete="off">
-        </div>
-      </div>
-      <button class="fire-btn" id="permGrantBtn" style="margin-top:10px;">Grant Access to All Uploaded Tracks</button>
-      <div id="permGrantResults" style="margin-top:14px; display:flex; flex-direction:column; gap:6px;"></div>
-      <div class="settings-note" id="permGrantNote" style="margin-top:8px;"></div>
-    </div>
-
-    <div class="panel">
       <h3>Show-Control Whitelist</h3>
       <div class="settings-note">
         Usernames listed here are allowed to trigger/control shows via chat commands. Building below bakes
@@ -473,29 +453,6 @@
       <button class="fire-btn" id="whitelistAddBtn" style="margin-top:10px;">Add</button>
       <div id="whitelistList" style="margin-top:14px; display:flex; flex-wrap:wrap; gap:8px;"></div>
       <div class="settings-note" id="whitelistNote" style="margin-top:8px;"></div>
-      <button class="btn-sm" id="whitelistDownloadBtn" style="margin-top:10px;">Download standalone Whitelist.rbxmx</button>
-    </div>
-
-    <div class="panel">
-      <h3>Build options</h3>
-      <div class="row-inline">
-        <input type="checkbox" id="obfuscateChk" style="width:16px; height:16px;">
-        <label for="obfuscateChk" style="font-size:0.85rem; color:var(--text-dim);">
-          Minify the Server/Commands/AudioClient scripts (strip comments &amp; extra whitespace) before
-          building
-        </label>
-      </div>
-      <div class="settings-note" style="margin-top:8px;">
-        Heads up on what this can and can't do: Roblox doesn't support shipping "encrypted" scripts that
-        still run — whoever has Studio access to a place can always read a Script's Source there, full stop.
-        The good news is that <b>Server</b> and <b>Commands</b> (the whitelist-check logic) run with
-        <code class="mono">RunContext = Server</code>, which Roblox never sends to players or exploits in
-        the first place — only client-side <b>LocalScripts</b> (the playback/sync script here) are ever
-        exposed to someone running exploit tools. This option just strips comments/whitespace from those
-        three scripts to make casual reading harder if you hand the file to someone else; it's minification,
-        not real encryption. The <b>Whitelist</b> module is left fully readable either way, since you're
-        meant to keep editing it here.
-      </div>
     </div>
 
     <div class="panel">
@@ -507,8 +464,30 @@
         hard-coded), bakes in the whitelist above, and gives you back one updated
         <code class="mono">.rbxm</code> — insert it into Studio same as before, no manual editing.
       </div>
-      <button class="fire-btn" id="buildRbxmBtn" style="margin-top:14px;">Build &amp; Download Updated XrAudioSystem.rbxm</button>
+      <button class="fire-btn" id="buildRbxmBtn" style="margin-top:14px; display:none;">Build &amp; Download Updated XrAudioSystem.rbxm</button>
+      <div class="settings-note" id="buildRbxmGateNote" style="margin-top:14px;">Upload at least one track above first — this builds from whatever's actually been uploaded.</div>
       <div class="settings-note" id="buildRbxmNote" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="panel">
+      <h3>Audio Permissions</h3>
+      <div class="settings-note">
+        This one's separate from everything above — it doesn't touch the show file at all. It grants a
+        Roblox account permission to actually <b>use</b> your uploaded audio in their own games, via
+        Roblox's real asset-permission system (different from the Show-Control Whitelist earlier, which
+        only controls in-game show triggering). The typical case: you uploaded from an alt account, and
+        your main account (or someone else's) needs to be able to insert these audio IDs into their own
+        place. Whoever's connected/API key is used here needs to own the assets being shared.
+      </div>
+      <div class="grid" style="margin-top:10px;">
+        <div class="field" style="grid-column: span 2;">
+          <label>Roblox username to grant access to</label>
+          <input type="text" id="permGrantNameInp" placeholder="RobloxUsername" autocomplete="off">
+        </div>
+      </div>
+      <button class="fire-btn" id="permGrantBtn" style="margin-top:10px;">Grant Access to All Uploaded Tracks</button>
+      <div id="permGrantResults" style="margin-top:14px; display:flex; flex-direction:column; gap:6px;"></div>
+      <div class="settings-note" id="permGrantNote" style="margin-top:8px;"></div>
     </div>
   </div>
 
@@ -1113,48 +1092,6 @@
   document.getElementById('whitelistAddBtn').addEventListener('click', addWhitelistName);
   whitelistNameInp.addEventListener('keydown', (e)=>{ if(e.key === 'Enter'){ e.preventDefault(); addWhitelistName(); } });
   renderWhitelist();
-
-  function xmlEscape(s){
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  }
-  function buildWhitelistLua(names){
-    const lines = names.map(n => `\t"${n}",`).join('\n');
-    return `-- Whitelist (ModuleScript) — place inside XrAudio folder\n` +
-      `-- Add or remove usernames from the list below.\n` +
-      `-- Generated from the Audio Prep Console Settings tab.\n\n` +
-      `local Whitelist = {\n${lines}\n}\n\nreturn Whitelist\n`;
-  }
-  function buildWhitelistRbxmx(names){
-    const source = buildWhitelistLua(names);
-    // ProtectedString bodies are plain-text (not CDATA) in Roblox's XML model format;
-    // angle brackets / ampersands inside the Lua source still need escaping.
-    return `<roblox xmlns:xmlne="http://www.roblox.com/roblox.1.dtd" version="4">\n` +
-      `  <Item class="ModuleScript" referent="RBX-Whitelist">\n` +
-      `    <Properties>\n` +
-      `      <string name="Name">Whitelist</string>\n` +
-      `      <ProtectedString name="Source">${xmlEscape(source)}</ProtectedString>\n` +
-      `    </Properties>\n` +
-      `  </Item>\n` +
-      `</roblox>\n`;
-  }
-  document.getElementById('whitelistDownloadBtn').addEventListener('click', ()=>{
-    const names = loadWhitelist();
-    if(names.length === 0){
-      whitelistNote.textContent = 'Add at least one username first.';
-      return;
-    }
-    const xml = buildWhitelistRbxmx(names);
-    const blob = new Blob([xml], {type: 'text/xml'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'Whitelist.rbxmx';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    whitelistNote.textContent = `Downloaded with ${names.length} username${names.length===1?'':'s'} ✓`;
-  });
 </script>
 
 <script type="module">
@@ -1528,9 +1465,29 @@ async function processOne(file, idx, total, opts){
   // budget shrinks automatically to keep memory flat, and — critically —
   // that budget doesn't depend on how long the whole set is, so a 50-minute
   // set and a 5-hour set are equally safe; there's just more (small) pieces.
-  const TARGET_ENCODED_SEGMENT_SECS = 8 * 60; // ~8 min of on-disk PCM per piece (~85MB) — safe headroom on basically any device
-  const SAFETY_TRIGGER_SRC_SECS = 12 * 60;    // below this, one pass is already well within safe memory — no need to chunk at all
-  const SAFETY_SEGMENT_SRC_SECS = TARGET_ENCODED_SEGMENT_SECS / PLAYBACK_SPEED;
+  //
+  // NOTE on the ~8 min target below: measured on-disk segment duration comes
+  // out equal to the source cut length (the asetrate/aresample pitch trick
+  // doesn't actually change the file's own duration — PLAYBACK_SPEED only
+  // describes how Roblox plays it back later), so this is a straight
+  // source-time budget, no conversion needed.
+  //
+  // When splitting into final Roblox-length chunks, segments are also
+  // rounded up to a whole multiple of the chunk length. That means every
+  // final chunk falls entirely inside exactly one internal segment — never
+  // straddling two — which was the actual cause of the missing final chunks
+  // on long sets (the boundary-spanning stitch path was where it broke down
+  // deep into a long run). It also means far fewer, larger ffmpeg calls
+  // instead of extra subclip+concat work for every other chunk, which is
+  // most of where the extra time was going.
+  const DESIRED_SEGMENT_SECS = 8 * 60; // ~8 min per piece — safe headroom on basically any device
+  const SAFETY_TRIGGER_SRC_SECS = 12 * 60; // below this, one pass is already well within safe memory — no need to chunk at all
+  let SAFETY_SEGMENT_SRC_SECS = DESIRED_SEGMENT_SECS;
+  if(opts.split){
+    const chunkSecsForAlign = (opts.splitMin*60) / PLAYBACK_SPEED;
+    const chunksPerSegment = Math.max(1, Math.round(DESIRED_SEGMENT_SECS / chunkSecsForAlign));
+    SAFETY_SEGMENT_SRC_SECS = chunksPerSegment * chunkSecsForAlign;
+  }
   const needsSafetySegments = srcDur > SAFETY_TRIGGER_SRC_SECS;
   const numSafetySegs = needsSafetySegments ? Math.ceil(srcDur / SAFETY_SEGMENT_SRC_SECS) : 1;
 
@@ -1595,10 +1552,11 @@ async function processOne(file, idx, total, opts){
       }catch(err){
         clearLiveProgress();
         await ffmpeg.deleteFile(partName).catch(()=>{});
+        const msg = (err && (err.message || (err.toString && err.toString()))) || 'unknown error (no message from the encoder)';
         if(attempt === 0){
-          log(`   Piece ${c+1}/${numSafetySegs} failed: ${err.message} — retrying once before giving up on it.`, 'warning');
+          log(`   Piece ${c+1}/${numSafetySegs} failed: ${msg} — retrying once before giving up on it.`, 'warning');
         } else {
-          log(`   Piece ${c+1}/${numSafetySegs} failed again: ${err.message} — skipping and continuing.`, 'critical');
+          log(`   Piece ${c+1}/${numSafetySegs} failed again: ${msg} — skipping and continuing.`, 'critical');
           failedSafetySegs.push({ piece: c+1, start, dur: dur !== undefined ? dur : (srcDur ? srcDur - start : undefined) });
         }
       }
@@ -1652,26 +1610,31 @@ async function processOne(file, idx, total, opts){
       // cut, not a re-encode), then concat those small pieces straight into
       // the final codec in one pass.
       const subNames = [];
-      for(let i=0;i<touched.length;i++){
-        const seg = touched[i];
-        const segLocalStart = Math.max(0, globalStart - seg.start);
-        const segLocalEnd = Math.min(seg.dur, globalEnd - seg.start);
-        const subDur = segLocalEnd - segLocalStart;
-        const subName = `${destName}_sub${i}.wav`;
-        // Lossless PCM->PCM re-encode, not `-c copy` — verified empirically
-        // that `-c copy` on a PCM WAV subclip isn't sample-exact (it rounds
-        // to some internal block size, ~tens of ms off), which would leave
-        // a tiny duplicated/dropped sliver right at the segment boundary.
-        // Re-encoding PCM->PCM is trivial (no real "encoding" happening,
-        // it's already uncompressed) and is exact.
-        await ffrun(['-y','-ss', segLocalStart.toFixed(6), '-i', seg.name, '-t', subDur.toFixed(6), '-codec:a','pcm_s16le', subName]);
-        subNames.push(subName);
-      }
       const listName = `${destName}_list.txt`;
-      await ffmpeg.writeFile(listName, new TextEncoder().encode(subNames.map(n=>`file '${n}'`).join('\n')+'\n'));
-      await ffrun(['-y','-f','concat','-safe','0','-i', listName, ...codecArgs, destName]);
-      await ffmpeg.deleteFile(listName).catch(()=>{});
-      for(const n of subNames) await ffmpeg.deleteFile(n).catch(()=>{});
+      try{
+        for(let i=0;i<touched.length;i++){
+          const seg = touched[i];
+          const segLocalStart = Math.max(0, globalStart - seg.start);
+          const segLocalEnd = Math.min(seg.dur, globalEnd - seg.start);
+          const subDur = segLocalEnd - segLocalStart;
+          const subName = `${destName}_sub${i}.wav`;
+          // Lossless PCM->PCM re-encode, not `-c copy` — verified empirically
+          // that `-c copy` on a PCM WAV subclip isn't sample-exact (it rounds
+          // to some internal block size, ~tens of ms off), which would leave
+          // a tiny duplicated/dropped sliver right at the segment boundary.
+          // Re-encoding PCM->PCM is trivial (no real "encoding" happening,
+          // it's already uncompressed) and is exact.
+          await ffrun(['-y','-ss', segLocalStart.toFixed(6), '-i', seg.name, '-t', subDur.toFixed(6), '-codec:a','pcm_s16le', subName]);
+          subNames.push(subName);
+        }
+        await ffmpeg.writeFile(listName, new TextEncoder().encode(subNames.map(n=>`file '${n}'`).join('\n')+'\n'));
+        await ffrun(['-y','-f','concat','-safe','0','-i', listName, ...codecArgs, destName]);
+      } finally {
+        // Always clean these up, success or failure — leftover temp files
+        // from a failed chunk shouldn't be able to affect the next one.
+        await ffmpeg.deleteFile(listName).catch(()=>{});
+        for(const n of subNames) await ffmpeg.deleteFile(n).catch(()=>{});
+      }
     }
   }
 
@@ -1685,15 +1648,25 @@ async function processOne(file, idx, total, opts){
       const dur = Math.min(chunkSecs, fullDur - start);
       if(dur <= 0.05) break;
       const outName = `${baseName}_part${c+1}.${ext}`;
-      try{
-        await extractRange(outName, start, dur);
-        const data = await ffmpeg.readFile(outName);
-        outputs.push({name: outName, blob: new Blob([data.buffer], {type:'audio/'+ext})});
-        log(`   ${outName} ✓ (${fmtTime(dur)} on disk → ${fmtTime(dur*PLAYBACK_SPEED)} in Roblox)`, 'good');
-        if(opts.autoUpload) queueAutoUpload(outputs[outputs.length-1]);
-      }catch(err){
-        log(`   ${outName} FAILED: ${err.message} — skipping this chunk and continuing with the rest.`, 'critical');
-        failedChunks.push(c+1);
+      let chunkOk = false;
+      for(let attempt=0; attempt<2 && !chunkOk; attempt++){
+        try{
+          await extractRange(outName, start, dur);
+          const data = await ffmpeg.readFile(outName);
+          outputs.push({name: outName, blob: new Blob([data.buffer], {type:'audio/'+ext})});
+          log(`   ${outName} ✓ (${fmtTime(dur)} on disk → ${fmtTime(dur*PLAYBACK_SPEED)} in Roblox)`, 'good');
+          if(opts.autoUpload) queueAutoUpload(outputs[outputs.length-1]);
+          chunkOk = true;
+        }catch(err){
+          const msg = (err && (err.message || (err.toString && err.toString()))) || 'unknown error (no message from the encoder)';
+          await ffmpeg.deleteFile(outName).catch(()=>{});
+          if(attempt === 0){
+            log(`   ${outName} failed: ${msg} — retrying once.`, 'warning');
+          } else {
+            log(`   ${outName} FAILED: ${msg} — skipping this chunk and continuing with the rest.`, 'critical');
+            failedChunks.push(c+1);
+          }
+        }
       }
       await ffmpeg.deleteFile(outName).catch(()=>{});
       // Free any segment fully behind the next chunk's start.
@@ -1746,6 +1719,12 @@ function uploadStateLabel(o){
   return '';
 }
 
+function updateBuildRbxmGate(){
+  const anyUploaded = outputBlobs.some(o => o.assetId);
+  document.getElementById('buildRbxmBtn').style.display = anyUploaded ? 'block' : 'none';
+  document.getElementById('buildRbxmGateNote').style.display = anyUploaded ? 'none' : 'block';
+}
+
 function renderOutputs(){
   const list = document.getElementById('outputsList');
   const empty = document.getElementById('outputsEmpty');
@@ -1754,6 +1733,7 @@ function renderOutputs(){
   list.innerHTML = '';
   const showBuildBlock = document.getElementById('showBuildBlock');
   const buildShowBtn = document.getElementById('buildShowBtn');
+  updateBuildRbxmGate();
   if(outputBlobs.length===0){ empty.style.display='block'; zipBtn.style.display='none'; uploadAllBtn.style.display='none'; showBuildBlock.style.display='none'; buildShowBtn.style.display='none'; document.getElementById('bulkRenameBlock').style.display='none'; return; }
   empty.style.display='none';
   zipBtn.style.display='block';
@@ -2076,21 +2056,6 @@ function fixServerSource(src){
   return out;
 }
 
-// Safe, conservative Lua "minifier": strips full-line and trailing `--` comments
-// and blank lines only. Does not rename locals (too easy to break with a naive
-// regex — e.g. inside strings), so this is genuine minification, not obfuscation.
-function minifyLua(src){
-  return src
-    .split('\n')
-    .map(line => {
-      // don't touch lines that contain a string literal with -- inside it (rough heuristic)
-      if(/["'].*--.*["']/.test(line)) return line;
-      return line.replace(/\s*--(?!\[).*$/, '');
-    })
-    .filter(line => line.trim().length > 0)
-    .join('\n');
-}
-
 document.getElementById('buildRbxmBtn').addEventListener('click', async () => {
   const note = document.getElementById('buildRbxmNote');
   const btn = document.getElementById('buildRbxmBtn');
@@ -2142,28 +2107,16 @@ document.getElementById('buildRbxmBtn').addEventListener('click', async () => {
       (wlNames.length ? '\n' : '') + '}\n\nreturn Whitelist\n';
     overrides.set(wlIdx, RbxmPatcher.patchStringProp(parsed.chunks[wlIdx], 0, wlSource));
 
-    // 4. Fix Server's track-collection bug + optional minify (Server/Commands/AudioClient only)
-    const obfuscate = document.getElementById('obfuscateChk').checked;
+    // 4. Fix Server's track-collection bug (Server/Commands/AudioClient only)
     const scriptSrcIdx = RbxmPatcher.findPropChunkIndex(parsed, 'Script', 'Source');
     const scripts = RbxmPatcher.findAllInstances(parsed, 'Script');
     const scriptValues = RbxmPatcher.readStringPropValues(parsed.chunks[scriptSrcIdx]);
     scripts.forEach(s => {
       let v = scriptValues[s.index];
       if(s.name === 'Server') v = fixServerSource(v);
-      if(obfuscate) v = minifyLua(v);
       scriptValues[s.index] = v;
     });
     overrides.set(scriptSrcIdx, RbxmPatcher.writeStringPropAll(parsed.chunks[scriptSrcIdx], scriptValues));
-
-    if(obfuscate){
-      const localScripts = RbxmPatcher.findAllInstances(parsed, 'LocalScript');
-      if(localScripts.length){
-        const lsIdx = RbxmPatcher.findPropChunkIndex(parsed, 'LocalScript', 'Source');
-        const lsValues = RbxmPatcher.readStringPropValues(parsed.chunks[lsIdx]);
-        localScripts.forEach(s => { lsValues[s.index] = minifyLua(lsValues[s.index]); });
-        overrides.set(lsIdx, RbxmPatcher.writeStringPropAll(parsed.chunks[lsIdx], lsValues));
-      }
-    }
 
     const rebuilt = RbxmPatcher.rebuildFile(parsed, overrides);
 
