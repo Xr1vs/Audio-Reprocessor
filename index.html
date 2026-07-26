@@ -21,6 +21,7 @@
     --fg:#000000; --fg-inverse:#ffffff;
   }
   *{box-sizing:border-box;}
+  button, input, select, textarea{ font-family:inherit; }
   #bgLayer{
     position:fixed; inset:0; z-index:0; pointer-events:none;
     background-size:cover; background-position:center; background-repeat:no-repeat;
@@ -209,6 +210,7 @@
     justify-content:center; margin-left:8px; transition:0.2s; flex-shrink:0;
   }
   .help-btn:hover{border-color:var(--text); color:var(--text);}
+  #rbxLinkBtn:hover{opacity:0.85; color:#111111 !important;}
 
   /* top-right Roblox account widget */
   .rbx-account{position:relative; margin-left:8px; flex-shrink:0;}
@@ -287,7 +289,7 @@
         <div class="tab" data-view="settings">Settings</div>
       </div>
       <button class="help-btn" id="tutorialReplayBtn" title="Show the tutorial again">?</button>
-      <button class="help-btn" id="rbxLinkBtn" style="width:auto; padding:0 14px;" title="Connect your Roblox account so uploads happen as you">Link Account</button>
+      <button class="help-btn" id="rbxLinkBtn" style="width:auto; padding:0 14px; background:#ffffff; color:#111111; border-color:#ffffff; font-weight:800;" title="Connect your Roblox account so uploads happen as you">Link Account</button>
       <div class="rbx-account" id="rbxAccountWidget">
         <div class="rbx-account-chip" id="rbxAccountChip" style="display:none;">
           <img class="rbx-avatar" id="rbxAvatarImg" src="" alt="">
@@ -1513,14 +1515,29 @@ async function processOne(file, idx, total, opts){
   // segment boundary) small segment(s) it falls in, and segments are deleted
   // the moment nothing upcoming still needs them — so peak memory stays
   // bounded to about 2 segments' worth, regardless of how long the show is.
-  const SAFETY_SEGMENT_SRC_SECS = 20 * 60;
-  const needsSafetySegments = srcDur > SAFETY_SEGMENT_SRC_SECS * 1.15;
+  // Segments used to be sized in *source* time (20 min) without accounting
+  // for the fact that every mode here re-encodes through `asetrate` +
+  // `aresample` to bake in Roblox's ~2.94x PlaybackSpeed compensation —
+  // which makes the ON-DISK (encoded) audio ~2.94x LONGER than the source,
+  // not shorter. A "20 source-minute" piece was actually producing close to
+  // 59 minutes of 44.1kHz PCM (~600MB) per piece. That's well past where
+  // ffmpeg-wasm's heap can silently fail mid-encode on longer/heavier sets
+  // (or on lower-memory devices/browsers) — and when a piece failed twice,
+  // it was dropped entirely, which is exactly "missing chunks of the set."
+  // Sizing segments by their ENCODED footprint instead means the source-time
+  // budget shrinks automatically to keep memory flat, and — critically —
+  // that budget doesn't depend on how long the whole set is, so a 50-minute
+  // set and a 5-hour set are equally safe; there's just more (small) pieces.
+  const TARGET_ENCODED_SEGMENT_SECS = 8 * 60; // ~8 min of on-disk PCM per piece (~85MB) — safe headroom on basically any device
+  const SAFETY_TRIGGER_SRC_SECS = 12 * 60;    // below this, one pass is already well within safe memory — no need to chunk at all
+  const SAFETY_SEGMENT_SRC_SECS = TARGET_ENCODED_SEGMENT_SECS / PLAYBACK_SPEED;
+  const needsSafetySegments = srcDur > SAFETY_TRIGGER_SRC_SECS;
   const numSafetySegs = needsSafetySegments ? Math.ceil(srcDur / SAFETY_SEGMENT_SRC_SECS) : 1;
 
   if(numSafetySegs > 1){
-    log(`Encoding in ${numSafetySegs} internal piece(s) of ~20 real-world minutes each (source-time, ` +
-      `unrelated to your Roblox chunk-length setting) — kept small and processed/cleaned up one at a ` +
-      `time so memory stays flat no matter how long the set is.`, 'header');
+    log(`Encoding in ${numSafetySegs} internal piece(s) of ~${fmtTime(SAFETY_SEGMENT_SRC_SECS)} each (source-time, ` +
+      `sized to keep each piece's on-disk memory footprint small regardless of how long the whole set is) — ` +
+      `kept small and processed/cleaned up one at a time so memory stays flat no matter how long the set is.`, 'header');
   } else {
     log('Encoding (pitch shift + noise reduction chain)…', 'header');
   }
@@ -1582,7 +1599,7 @@ async function processOne(file, idx, total, opts){
           log(`   Piece ${c+1}/${numSafetySegs} failed: ${err.message} — retrying once before giving up on it.`, 'warning');
         } else {
           log(`   Piece ${c+1}/${numSafetySegs} failed again: ${err.message} — skipping and continuing.`, 'critical');
-          failedSafetySegs.push(c+1);
+          failedSafetySegs.push({ piece: c+1, start, dur: dur !== undefined ? dur : (srcDur ? srcDur - start : undefined) });
         }
       }
     }
@@ -1710,9 +1727,14 @@ async function processOne(file, idx, total, opts){
 
   setBar('fileBar', (idx+1)/total);
   const totalTook = (performance.now()-jobStart)/1000;
-  log(`${file.name} -> ${outputs.length} file(s) in ${totalTook.toFixed(1)}s` +
-    (failedSafetySegs.length ? ` (${failedSafetySegs.length} internal piece(s) failed — see above)` : ''),
-    failedSafetySegs.length ? 'warning' : 'good');
+  if(failedSafetySegs.length){
+    const ranges = failedSafetySegs.map(f => `${fmtTime(f.start)}–${f.dur !== undefined ? fmtTime(f.start+f.dur) : 'end'} (source-time)`).join(', ');
+    log(`${file.name} -> ${outputs.length} file(s) in ${totalTook.toFixed(1)}s — ` +
+      `${failedSafetySegs.length} internal piece(s) failed and were skipped, so the following is MISSING ` +
+      `from the output: ${ranges}. Try again — this should be rare now that pieces are sized much smaller.`, 'critical');
+  } else {
+    log(`${file.name} -> ${outputs.length} file(s) in ${totalTook.toFixed(1)}s`, 'good');
+  }
   return outputs;
 }
 
