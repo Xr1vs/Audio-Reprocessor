@@ -1600,7 +1600,7 @@ async function processOne(file, idx, total, opts){
     // 2 at a boundary — never more, since chunks are far shorter than a
     // segment) and stitch only those small pieces.
     const globalEnd = globalStart + dur;
-    const touched = segMeta.filter(s => s.start < globalEnd - 1e-6 && s.start + s.dur > globalStart + 1e-6);
+    const touched = segMeta.filter(s => s.start < globalEnd - 0.05 && s.start + s.dur > globalStart + 0.05);
     if(touched.length === 1){
       const seg = touched[0];
       await ffrun(['-y','-ss', (globalStart-seg.start).toFixed(6), '-i', seg.name, '-t', dur.toFixed(6), ...codecArgs, destName]);
@@ -1643,11 +1643,18 @@ async function processOne(file, idx, total, opts){
     const numChunks = Math.max(1, Math.ceil(fullDur / chunkSecs));
     log(`Splitting into ${numChunks} chunk(s) of ${opts.splitMin} min (Roblox time) each…`, 'header');
     const failedChunks = [];
+    // Zero-padded so these sort correctly by plain alphabetical order —
+    // not just "natural"/numeric order — anywhere they end up: a file
+    // browser, a zip you hand someone, or Roblox's own asset manager, which
+    // lists uploaded audio by name and doesn't know "part10" should come
+    // after "part9". Unpadded names looked fine right up until a set had 10+
+    // chunks, at which point e.g. part24 would sort right after part2.
+    const partPad = String(numChunks).length;
     for(let c=0;c<numChunks;c++){
       const start = c*chunkSecs;
       const dur = Math.min(chunkSecs, fullDur - start);
       if(dur <= 0.05) break;
-      const outName = `${baseName}_part${c+1}.${ext}`;
+      const outName = `${baseName}_part${String(c+1).padStart(partPad,'0')}.${ext}`;
       let chunkOk = false;
       for(let attempt=0; attempt<2 && !chunkOk; attempt++){
         try{
@@ -1671,7 +1678,7 @@ async function processOne(file, idx, total, opts){
       await ffmpeg.deleteFile(outName).catch(()=>{});
       // Free any segment fully behind the next chunk's start.
       const nextStart = start + dur;
-      const stillNeededFrom = segMeta.findIndex(s => s.start + s.dur > nextStart + 1e-6);
+      const stillNeededFrom = segMeta.findIndex(s => s.start + s.dur > nextStart + 0.05);
       await freeSegmentsBefore(stillNeededFrom === -1 ? segMeta.length : stillNeededFrom);
     }
     if(failedChunks.length){
