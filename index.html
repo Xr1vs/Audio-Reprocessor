@@ -1441,8 +1441,33 @@ async function processOne(file, idx, total, opts){
   log('Reading file info…', 'header');
   const probeOut = await ffrun(['-i', inName]);
   const sr = parseSampleRate(probeOut);
-  const srcDur = parseDuration(probeOut) || 0;
+  let srcDur = parseDuration(probeOut) || 0;
   log(`   Sample rate: ${sr}Hz — Duration: ${srcDur ? fmtTime(srcDur) : 'unknown'}`, 'info');
+
+  // Decode the whole file once, straight through with no seeking at all, to
+  // a clean intermediate WAV. Compressed source formats — MP3 especially,
+  // and especially the kind of MP3 that comes out of a phone recording app
+  // or a DJ tool without a proper VBR/Xing seek index — can seek to a
+  // slightly (or occasionally not-so-slightly) wrong position when `-ss` is
+  // used directly on them, since ffmpeg has to estimate a byte offset rather
+  // than jump to a known-exact one. That's the kind of thing that would show
+  // up as one exported chunk suddenly containing audio from a different part
+  // of the set partway through. A plain WAV has no such ambiguity — any seek
+  // into it lands on an exact, correct sample every time — so every segment
+  // cut after this reads from here instead of the original file.
+  setStatus(`(${idx+1}/${total}) Decoding: ${file.name}`);
+  log('Decoding source once (avoids seek inaccuracy on some compressed files)…', 'header');
+  const decodedName = `in_${idx}_decoded.wav`;
+  await ffrun(['-y', '-i', inName, '-ar', '44100', '-codec:a', 'pcm_s16le', decodedName]);
+  await ffmpeg.deleteFile(inName).catch(()=>{});
+  const decodedProbeOut = await ffrun(['-i', decodedName]);
+  const decodedDur = parseDuration(decodedProbeOut) || srcDur;
+  if(srcDur && Math.abs(decodedDur - srcDur) > 2){
+    log(`   Note: the source file's own metadata said ${fmtTime(srcDur)}, but the actual decoded audio is ` +
+      `${fmtTime(decodedDur)} — MP3 files (especially from phone/DJ-app recordings) can under- or over-report ` +
+      `their own length; ${fmtTime(decodedDur)} is what's actually being used.`, 'warning');
+  }
+  srcDur = decodedDur;
 
   const volLinear = Math.pow(10, opts.volDb/20);
   const chain = buildFilterChain(opts.mode, sr, volLinear, opts.noise);
@@ -1538,7 +1563,7 @@ async function processOne(file, idx, total, opts){
       try{
         const segArgs = ['-y'];
         if(numSafetySegs > 1) segArgs.push('-ss', start.toFixed(6));
-        segArgs.push('-i', inName);
+        segArgs.push('-i', decodedName);
         if(numSafetySegs > 1 && dur !== undefined) segArgs.push('-t', dur.toFixed(6));
         // pcm_s16le, not f32le — halves the memory footprint of every piece
         // in flight, with no audible cost here since the final output is
@@ -1579,7 +1604,7 @@ async function processOne(file, idx, total, opts){
       }
     }
   }
-  await ffmpeg.deleteFile(inName).catch(()=>{});
+  await ffmpeg.deleteFile(decodedName).catch(()=>{});
 
   if(segMeta.length === 0){
     log(`   Nothing encoded for ${file.name} — every piece failed.`, 'critical');
@@ -2130,6 +2155,30 @@ document.getElementById('buildRbxmBtn').addEventListener('click', async () => {
     overrides.set(nameIdx, RbxmPatcher.writeStringPropAll(parsed.chunks[nameIdx], names));
     overrides.set(idIdx, RbxmPatcher.writeStringPropAll(parsed.chunks[idIdx], ids));
 
+    // 2.5. Fix the Compressor/Equalizer effects baked into every Sound slot.
+    // Inspecting the shipped template found GainMakeup and all three Equalizer
+    // gains set to values wildly outside Roblox's valid ranges (e.g.
+    // GainMakeup=200 where the max is 30, HighGain=10,000,000 where the max
+    // is 10) — Roblox silently clamps these to their maximums rather than
+    // erroring, so every uploaded track was getting +30dB of unconditional
+    // makeup gain plus +10dB on every EQ band, all stacked. That's exactly
+    // the kind of gain that turns an inaudible noise floor into audible
+    // static — and only shows up once actually played in Roblox with these
+    // effects live, not in the exported file itself. Zeroing them out here
+    // removes that gain stacking; the Compressor's Threshold/Ratio/Attack/
+    // Release are left alone since those looked like reasonable settings.
+    const compIdx = RbxmPatcher.findPropChunkIndex(parsed, 'CompressorSoundEffect', 'GainMakeup');
+    if(compIdx !== null){
+      const comps = RbxmPatcher.findAllInstances(parsed, 'CompressorSoundEffect');
+      overrides.set(compIdx, RbxmPatcher.writeFloatPropAll(parsed.chunks[compIdx], new Array(comps.length).fill(0)));
+    }
+    for(const band of ['HighGain','MidGain','LowGain']){
+      const eqIdx = RbxmPatcher.findPropChunkIndex(parsed, 'EqualizerSoundEffect', band);
+      if(eqIdx === null) continue;
+      const eqs = RbxmPatcher.findAllInstances(parsed, 'EqualizerSoundEffect');
+      overrides.set(eqIdx, RbxmPatcher.writeFloatPropAll(parsed.chunks[eqIdx], new Array(eqs.length).fill(0)));
+    }
+
     // 3. Bake in the whitelist
     const wlIdx = RbxmPatcher.findPropChunkIndex(parsed, 'ModuleScript', 'Source');
     const wlNames = JSON.parse(localStorage.getItem('xr_whitelist_usernames') || '[]');
@@ -2164,7 +2213,8 @@ document.getElementById('buildRbxmBtn').addEventListener('click', async () => {
     URL.revokeObjectURL(url);
 
     note.textContent = `Built "${showName}" with ${tracks.length} track${tracks.length===1?'':'s'} and ` +
-      `${wlNames.length} whitelisted user${wlNames.length===1?'':'s'} ✓ — insert this .rbxm the same way as ` +
+      `${wlNames.length} whitelisted user${wlNames.length===1?'':'s'} ✓ (also zeroed out the Compressor/Equalizer ` +
+      `gain stacking that was clamping to +40dB and causing static in-game) — insert this .rbxm the same way as ` +
       `before (right-click a service → Insert from File).`;
     if(window.addHistory) window.addHistory('build', `Built <b>${showName}.rbxm</b> with ${tracks.length} track(s) and ${wlNames.length} whitelisted user(s)`);
   } catch(err){
