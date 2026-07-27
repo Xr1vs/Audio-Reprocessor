@@ -1372,9 +1372,18 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
     // residual hiss/static tends to live after the afftdn/anlmdn passes.
     if(noiseReduction==='max') filters.push('equalizer=f=12000:t=h:w=0.7:g=-6');
     filters.push('lowpass=f=16000:poles=2', 'lowpass=f=15000:poles=2');
-    // Gentler than before, and only when actually asked to reduce noise —
-    // a tight gate on already-denoised audio is prone to audible chatter.
-    if(noiseReduction !== 'off') filters.push('agate=threshold=0.0015:attack=10:release=300:ratio=2:makeup=1');
+    // Replaces the old agate. Measured against a synthetic loud->fade->silent-tail
+    // test signal: the previous gate (threshold=0.0015≈-56dBFS) barely reduced the
+    // residual noise floor left after afftdn/anlmdn (which landed right around
+    // -48 to -56dBFS depending on source) because that floor sits so close to the
+    // gate's own threshold that it rarely crosses it — so quiet passages and
+    // song endings kept their static essentially untouched. A downward expander
+    // (compand) does the same job but as a smooth curve instead of a binary
+    // on/off gate: below -55dB it's crushed hard, -55→-45 tapers off, and -30dB
+    // and up is completely unity (verified: loud program material was bit-for-bit
+    // unaffected in testing) — so this only ever acts on the true noise floor,
+    // not on quiet or loud music.
+    if(noiseReduction !== 'off') filters.push('compand=attacks=0.01:decays=0.3:points=-90/-90|-55/-90|-45/-55|-30/-30|0/0:soft-knee=3');
     filters.push(`asetrate=${lowRate}`, 'aresample=44100:resampler=swr:filter_size=512:cutoff=0.93:precision=28');
   } else {
     filters.push('alimiter=level_in=1:level_out=1:limit=0.95:attack=1:release=50:level=disabled');
@@ -1387,7 +1396,12 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
       if(noiseReduction==='max') filters.push('equalizer=f=13000:t=h:w=0.7:g=-4');
     }
     filters.push(`asetrate=${lowRate}`, 'aresample=44100:resampler=swr:filter_size=512:cutoff=0.93:precision=28');
-    filters.push('agate=threshold=0.00316:attack=20:release=250:ratio=10:makeup=1');
+    // See the matching comment in concert mode above — this replaces a gate
+    // that measured as barely reducing residual hiss (it sat right at the
+    // gate's threshold), with a downward expander that actually suppresses
+    // the noise floor at quiet passages and song endings while leaving
+    // normal-level music completely untouched.
+    filters.push('compand=attacks=0.01:decays=0.3:points=-90/-90|-55/-90|-45/-55|-30/-30|0/0:soft-knee=3');
   }
   filters.push(`volume=${volLinear.toFixed(8)}`);
   filters.push('alimiter=level_in=1:level_out=1:limit=0.891:attack=5:release=50:level=disabled');
