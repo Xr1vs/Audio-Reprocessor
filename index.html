@@ -1506,9 +1506,12 @@ async function processOne(file, idx, total, opts){
   const failedSafetySegs = [];
   let cumulativeEncodedStart = 0;
   for(let c = 0; c < numSafetySegs; c++){
+    const isLastSeg = c === numSafetySegs - 1;
     const start = c * SAFETY_SEGMENT_SRC_SECS;
-    const dur = srcDur ? Math.min(SAFETY_SEGMENT_SRC_SECS, srcDur - start) : undefined;
-    if(srcDur && dur <= 0.05) break;
+    // Only cap non-final pieces by the probed duration. The final piece
+    // intentionally has no -t limit below — see note above this loop.
+    const dur = (srcDur && !isLastSeg) ? Math.min(SAFETY_SEGMENT_SRC_SECS, srcDur - start) : undefined;
+    if(srcDur && dur !== undefined && dur <= 0.05) break;
     const partName = `${baseName}_enc${c+1}.wav`;
     const label = numSafetySegs > 1
       ? `(${idx+1}/${total}) ${file.name} — encoding piece ${c+1}/${numSafetySegs}`
@@ -1571,6 +1574,12 @@ async function processOne(file, idx, total, opts){
 
   const fullDur = cumulativeEncodedStart;
   log(`   Duration on disk: ${fmtTime(fullDur)} (plays as ${fmtTime(fullDur*PLAYBACK_SPEED)} in Roblox)`, 'info');
+  if(srcDur && Math.abs(fullDur - srcDur) > 2){
+    log(`   Note: the source file's own metadata said ${fmtTime(srcDur)}, but ${fmtTime(fullDur)} of audio was ` +
+      `actually decoded — MP3 files (especially from phone/DJ-app recordings) can under- or over-report their ` +
+      `own length in their header; the file was fully decoded to its real end rather than trusting that number, ` +
+      `so ${fmtTime(fullDur)} is what's actually being used.`, 'warning');
+  }
 
   // QC peak-level check, sampled from the first segment only — cheap, and a
   // representative read without needing the full show assembled anywhere.
