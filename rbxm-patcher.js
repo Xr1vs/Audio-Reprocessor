@@ -316,6 +316,49 @@ function writeStringPropAll(chunk, values){
   return w.toBytes();
 }
 
-global.RbxmPatcher = { parseFile, findAllInstances, patchStringProp, rebuildFile, findPropChunkIndex, readStringPropValues, writeStringPropAll };
+function rotl32(x,n){ x = x >>> 0; return ((x << n) | (x >>> (32-n))) >>> 0; }
+function rotr32(x,n){ x = x >>> 0; return ((x >>> n) | (x << (32-n))) >>> 0; }
+function floatToBits(f){ const b = new ArrayBuffer(4); new DataView(b).setFloat32(0, f, false); return new DataView(b).getUint32(0, false); }
+function bitsToFloat(bits){ const b = new ArrayBuffer(4); new DataView(b).setUint32(0, bits, false); return new DataView(b).getFloat32(0, false); }
+
+// Float32 properties are stored byte-plane-interleaved (like referents/ints)
+// AND bit-rotated by 1 (moving the sign bit next to the mantissa, which
+// compresses better) — verified by round-trip testing against known-good
+// values read from a real .rbxm. Reading N=1 (a single instance) collapses
+// to a plain 4-byte read, which is the common case here since it's always
+// "the same value on every instance", but this handles any count.
+function readFloatPropValues(chunk, count){
+  const cr = new Reader(chunk.data);
+  cr.u32(); cr.string(); cr.u8();
+  const bytes = cr.bytes(count*4);
+  const out = new Array(count);
+  for(let i=0;i<count;i++){
+    const stored = ((bytes[i]<<24)|(bytes[count+i]<<16)|(bytes[2*count+i]<<8)|bytes[3*count+i]) >>> 0;
+    out[i] = bitsToFloat(rotr32(stored, 1));
+  }
+  return out;
+}
+
+function writeFloatPropAll(chunk, values){
+  const cr = new Reader(chunk.data);
+  const typeId = cr.u32();
+  const propName = cr.string();
+  cr.u8();
+  const n = values.length;
+  const bytes = new Uint8Array(n*4);
+  for(let i=0;i<n;i++){
+    const stored = rotl32(floatToBits(values[i]), 1);
+    bytes[i]       = (stored >>> 24) & 0xff;
+    bytes[n+i]     = (stored >>> 16) & 0xff;
+    bytes[2*n+i]   = (stored >>> 8) & 0xff;
+    bytes[3*n+i]   = stored & 0xff;
+  }
+  const w = new Writer();
+  w.u32(typeId); w.string(propName); w.u8(0x04);
+  w.push(bytes);
+  return w.toBytes();
+}
+
+global.RbxmPatcher = { parseFile, findAllInstances, patchStringProp, rebuildFile, findPropChunkIndex, readStringPropValues, writeStringPropAll, readFloatPropValues, writeFloatPropAll };
 // served as a static asset, loaded via <script src="/rbxm-patcher.js"></script>
 })(typeof window !== 'undefined' ? window : globalThis);
