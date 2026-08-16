@@ -1444,30 +1444,19 @@ async function processOne(file, idx, total, opts){
   let srcDur = parseDuration(probeOut) || 0;
   log(`   Sample rate: ${sr}Hz — Duration: ${srcDur ? fmtTime(srcDur) : 'unknown'}`, 'info');
 
-  // Decode the whole file once, straight through with no seeking at all, to
-  // a clean intermediate WAV. Compressed source formats — MP3 especially,
-  // and especially the kind of MP3 that comes out of a phone recording app
-  // or a DJ tool without a proper VBR/Xing seek index — can seek to a
-  // slightly (or occasionally not-so-slightly) wrong position when `-ss` is
-  // used directly on them, since ffmpeg has to estimate a byte offset rather
-  // than jump to a known-exact one. That's the kind of thing that would show
-  // up as one exported chunk suddenly containing audio from a different part
-  // of the set partway through. A plain WAV has no such ambiguity — any seek
-  // into it lands on an exact, correct sample every time — so every segment
-  // cut after this reads from here instead of the original file.
-  setStatus(`(${idx+1}/${total}) Decoding: ${file.name}`);
-  log('Decoding source once (avoids seek inaccuracy on some compressed files)…', 'header');
-  const decodedName = `in_${idx}_decoded.wav`;
-  await ffrun(['-y', '-i', inName, '-ar', '44100', '-codec:a', 'pcm_s16le', decodedName]);
-  await ffmpeg.deleteFile(inName).catch(()=>{});
-  const decodedProbeOut = await ffrun(['-i', decodedName]);
-  const decodedDur = parseDuration(decodedProbeOut) || srcDur;
-  if(srcDur && Math.abs(decodedDur - srcDur) > 2){
-    log(`   Note: the source file's own metadata said ${fmtTime(srcDur)}, but the actual decoded audio is ` +
-      `${fmtTime(decodedDur)} — MP3 files (especially from phone/DJ-app recordings) can under- or over-report ` +
-      `their own length; ${fmtTime(decodedDur)} is what's actually being used.`, 'warning');
-  }
-  srcDur = decodedDur;
+  // NOTE: this used to decode the ENTIRE source file — even a 2-3hr concert
+  // set — into one uncompressed intermediate WAV before doing anything else,
+  // to dodge -ss seek inaccuracy on compressed formats like MP3. That WAV
+  // for a real long set is well over a gigabyte, all sitting in ffmpeg-wasm's
+  // in-memory filesystem at once. On many devices/browsers that's enough to
+  // exceed what the wasm heap can reliably hold — and ffmpeg-wasm doesn't
+  // always fail loudly when that happens; it can silently produce truncated
+  // or corrupted output instead. That's exactly what "jumps to a random part
+  // of the set" and "doesn't do the full set" look like from the outside.
+  // The fix below decodes per internal safety-segment instead (see the loop
+  // further down), so at most one small piece of raw audio is ever resident
+  // in memory — never the whole show — while still avoiding the original
+  // compressed-seek-inaccuracy problem via a margin-and-re-seek trick.
 
   const volLinear = Math.pow(10, opts.volDb/20);
   const chain = buildFilterChain(opts.mode, sr, volLinear, opts.noise);
@@ -1558,26 +1547,67 @@ async function processOne(file, idx, total, opts){
     setStatus(label);
     if(numSafetySegs > 1) log(`\n-- Encoding piece ${c+1}/${numSafetySegs} (source ${fmtTime(start)}${dur?` → ${fmtTime(start+dur)}`:''}) --`, 'header');
 
+    // Two-stage seek per piece:
+    //   1) Coarse seek on the ORIGINAL (possibly compressed) source, backed
+    //      off by a margin before `start` and extended by a margin past the
+    //      piece's end. Byte-estimated seeking on formats like MP3 can be a
+    //      bit off, so this margin exists purely to absorb that inaccuracy —
+    //      it does NOT need to be exact.
+    //   2) An exact re-seek to `start` *within* that now-decoded (PCM) raw
+    //      piece, which — unlike the compressed source — seeks perfectly,
+    //      before the filter chain runs.
+    // Net effect: sample-accurate cuts, same as decoding the whole file up
+    // front used to guarantee, but with only ~1 piece's worth of raw audio
+    // (a few minutes, not hours) ever resident in memory at a time.
+    const PREROLL = numSafetySegs > 1 ? Math.min(20, start) : 0;
+    const POSTROLL = (numSafetySegs > 1 && dur !== undefined) ? 20 : 0;
+    const rawStart = Math.max(0, start - PREROLL);
+    const exactOffset = start - rawStart;
+    const rawDur = dur !== undefined ? (exactOffset + dur + POSTROLL) : undefined;
+    const rawName = `${baseName}_raw${c+1}.wav`;
+
     let segOk = false;
     for(let attempt=0; attempt<2 && !segOk; attempt++){
       try{
+        setLiveProgress(dur || srcDur, label);
+        const segStartT = performance.now();
+
+        const rawArgs = ['-y'];
+        if(rawStart > 0) rawArgs.push('-ss', rawStart.toFixed(6));
+        rawArgs.push('-i', inName);
+        if(rawDur !== undefined) rawArgs.push('-t', rawDur.toFixed(6));
+        rawArgs.push('-ar', '44100', '-codec:a', 'pcm_s16le', rawName);
+        await ffrun(rawArgs);
+
+        const rawProbeOut = await ffrun(['-i', rawName]);
+        const rawActualDur = parseDuration(rawProbeOut) || 0;
+        // Clamp to what actually got decoded, in case the source's own
+        // metadata over-reported its length (see the note further below).
+        const segDur = dur !== undefined
+          ? Math.max(0, Math.min(dur, rawActualDur - exactOffset))
+          : Math.max(0, rawActualDur - exactOffset);
+
         const segArgs = ['-y'];
-        if(numSafetySegs > 1) segArgs.push('-ss', start.toFixed(6));
-        segArgs.push('-i', decodedName);
-        if(numSafetySegs > 1 && dur !== undefined) segArgs.push('-t', dur.toFixed(6));
+        if(exactOffset > 0) segArgs.push('-ss', exactOffset.toFixed(6));
+        segArgs.push('-i', rawName);
+        if(segDur > 0) segArgs.push('-t', segDur.toFixed(6));
         // pcm_s16le, not f32le — halves the memory footprint of every piece
         // in flight, with no audible cost here since the final output is
         // re-encoded to your chosen (usually lossy) format anyway.
         segArgs.push('-af', chain, '-ar', '44100', '-codec:a', 'pcm_s16le', partName);
-
-        setLiveProgress(dur || srcDur, label);
-        const segStartT = performance.now();
         await ffrun(segArgs);
+        await ffmpeg.deleteFile(rawName).catch(()=>{});
         clearLiveProgress();
         setBar('stageBar', (c+1)/numSafetySegs);
 
         const segDurOut = await ffrun(['-i', partName]);
         const segEncodedDur = parseDuration(segDurOut) || 0;
+        // Sanity check: if this piece came out drastically shorter than
+        // requested, treat it as a failed/corrupted piece rather than
+        // silently accepting missing or truncated audio.
+        if(dur !== undefined && dur > 1 && segEncodedDur < dur * 0.5){
+          throw new Error(`piece decoded far shorter than expected (${fmtTime(segEncodedDur)} of ${fmtTime(dur)}) — likely a corrupted/truncated decode`);
+        }
         segMeta.push({ name: partName, start: cumulativeEncodedStart, dur: segEncodedDur });
         cumulativeEncodedStart += segEncodedDur;
 
@@ -1593,6 +1623,7 @@ async function processOne(file, idx, total, opts){
         }
       }catch(err){
         clearLiveProgress();
+        await ffmpeg.deleteFile(rawName).catch(()=>{});
         await ffmpeg.deleteFile(partName).catch(()=>{});
         const msg = (err && (err.message || (err.toString && err.toString()))) || 'unknown error (no message from the encoder)';
         if(attempt === 0){
@@ -1604,7 +1635,7 @@ async function processOne(file, idx, total, opts){
       }
     }
   }
-  await ffmpeg.deleteFile(decodedName).catch(()=>{});
+  await ffmpeg.deleteFile(inName).catch(()=>{});
 
   if(segMeta.length === 0){
     log(`   Nothing encoded for ${file.name} — every piece failed.`, 'critical');
