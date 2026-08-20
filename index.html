@@ -328,11 +328,13 @@
       <div class="grid">
         <div class="field"><label>Output Volume</label>
           <select id="volSel">
-            <option value="-50">−50 dB (loudest)</option>
-            <option value="-55" selected>−55 dB</option>
+            <option value="-50">−50 dB (loudest — only for a plain Sound with no Volume/Compressor/Equalizer boost)</option>
+            <option value="-55">−55 dB</option>
             <option value="-60">−60 dB</option>
+            <option value="-63" selected>−63 dB (matched to Volume=10 + maxed EqualizerSoundEffect + CompressorSoundEffect GainMakeup=30 — see note)</option>
             <option value="-70">−70 dB (quiet)</option>
           </select>
+          <div class="settings-note" style="margin-top:8px;">If your Roblox setup uses <b>Sound.Volume = 10</b>, an <b>EqualizerSoundEffect</b> with all three gains maxed out, and a <b>CompressorSoundEffect</b> with GainMakeup maxed out (30, Roblox's real ceiling — values above 30 just get clamped to it, they don't do anything extra), that stack adds a flat <b>+60 dB</b> to everything below the compressor's threshold. A normally-loud export (around −1 dB) comes out around <b>+59 dB</b> after that — hard digital clipping, which is what "static," especially in quiet parts, usually actually is. <b>−63 dB</b> is sized to land safely under 0 dB once that +60 dB gets added back in Roblox. If you change any of those three Roblox properties, this number needs to be recalculated to match.</div>
         </div>
         <div class="field"><label>Noise / Static Removal</label>
           <div class="settings-note" style="margin-top:8px;">Always on at max strength — there's no dial anymore, every file gets the heaviest denoise chain automatically.</div>
