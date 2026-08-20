@@ -1137,7 +1137,7 @@ function updateChunkSizeNote(){
   const fmt = document.getElementById('fmtSel').value;
   const bitrateKbps = {ogg_hq:384, ogg_std:256, ogg:256, mp3:190, wav:1411}[fmt] ?? 256;
   const splitMin = parseFloat(splitMinEl.value) || 0;
-  const encodedSecs = (splitMin*60) / PLAYBACK_SPEED; // actual on-disk duration per chunk
+  const encodedSecs = (splitMin*60) * PLAYBACK_SPEED; // actual on-disk duration per chunk — on-disk is PLAYBACK_SPEED times LONGER than what Roblox actually plays back
   const estMB = (bitrateKbps*1000/8 * encodedSecs) / (1024*1024);
   const VERCEL_LIMIT_MB = 4.5;
   if(!splitOn){ note.textContent = ''; return; }
@@ -1512,17 +1512,69 @@ async function processOne(file, idx, total, opts){
   const SAFETY_TRIGGER_SRC_SECS = 12 * 60; // below this, one pass is already well within safe memory — no need to chunk at all
   let SAFETY_SEGMENT_SRC_SECS = DESIRED_SEGMENT_SECS;
   if(opts.split){
-    const chunkSecsForAlign = (opts.splitMin*60) / PLAYBACK_SPEED;
+    // Source-time length of one final Roblox-length chunk. The on-disk
+    // (encoded) file is PLAYBACK_SPEED times LONGER than the source cut
+    // that produced it (asetrate/aresample bakes in the pitch-down), and
+    // Roblox then plays it back PLAYBACK_SPEED times FASTER — those two
+    // cancel out, so a chunk's Roblox-playback length equals its SOURCE
+    // length directly. No PLAYBACK_SPEED factor belongs here at all.
+    const chunkSecsForAlign = opts.splitMin*60;
     const chunksPerSegment = Math.max(1, Math.round(DESIRED_SEGMENT_SECS / chunkSecsForAlign));
     SAFETY_SEGMENT_SRC_SECS = chunksPerSegment * chunkSecsForAlign;
   }
   const needsSafetySegments = srcDur > SAFETY_TRIGGER_SRC_SECS;
-  const numSafetySegs = needsSafetySegments ? Math.ceil(srcDur / SAFETY_SEGMENT_SRC_SECS) : 1;
+
+  // ---- Pre-split pass (long files only) ----
+  // A previous version of this fix decoded each piece by `-ss` seeking
+  // straight into the compressed source with a margin, then re-seeking
+  // exactly inside the small decoded result. That still relies on the
+  // compressed source's `-ss` seek landing within that margin — which is
+  // exactly the assumption that doesn't hold for the kind of file this tool
+  // is built for (long DJ-set/phone-recorded MP3s often without a proper
+  // VBR/Xing seek index), and is the original "jumps to a random part of
+  // the set" failure mode one level deeper.
+  //
+  // The actual fix: never seek into the compressed source at all. `-f
+  // segment` with `-c copy` reads the file forward exactly once from start
+  // to finish (pure sequential demuxing, no seeking, no decoding — just
+  // repackaging already-compressed audio packets into small container
+  // files) and cuts at real packet timestamps, so the boundaries are
+  // accurate regardless of how good or bad the source's own index is. Each
+  // resulting piece is small and compressed, so this whole pass is light on
+  // memory even for a multi-hour file. Every later step then decodes one
+  // whole small piece start-to-finish (no seeking needed there either,
+  // since it's already cut to the right length) before deleting it.
+  let rawSegNames;
+  if(needsSafetySegments){
+    setStatus(`(${idx+1}/${total}) Pre-splitting: ${file.name}`);
+    log(`Pre-splitting into ~${fmtTime(SAFETY_SEGMENT_SRC_SECS)} raw piece(s) (no re-encoding, no seeking — ` +
+      `just cutting the compressed audio at real packet boundaries so accuracy doesn't depend on the file's own seek index)…`, 'header');
+    const presplitPrefix = `presplit_${idx}_`;
+    await ffrun(['-y', '-i', inName, '-map', '0:a:0', '-c', 'copy', '-f', 'segment',
+      '-segment_time', SAFETY_SEGMENT_SRC_SECS.toFixed(6), '-reset_timestamps', '1',
+      `${presplitPrefix}%05d.mka`]);
+    const dirList = await ffmpeg.listDir('/');
+    rawSegNames = dirList
+      .filter(f => !f.isDir && f.name.startsWith(presplitPrefix))
+      .map(f => f.name)
+      .sort();
+    if(rawSegNames.length === 0){
+      // Segment muxer found nothing to cut (shouldn't normally happen) —
+      // fall back to treating the whole file as one piece rather than
+      // silently producing nothing.
+      log('   Pre-split produced no pieces — falling back to processing the whole file as one piece.', 'warning');
+      rawSegNames = [inName];
+    } else {
+      await ffmpeg.deleteFile(inName).catch(()=>{});
+      log(`   Pre-split into ${rawSegNames.length} raw piece(s).`, 'good');
+    }
+  } else {
+    rawSegNames = [inName];
+  }
+  const numSafetySegs = rawSegNames.length;
 
   if(numSafetySegs > 1){
-    log(`Encoding in ${numSafetySegs} internal piece(s) of ~${fmtTime(SAFETY_SEGMENT_SRC_SECS)} each (source-time, ` +
-      `sized to keep each piece's on-disk memory footprint small regardless of how long the whole set is) — ` +
-      `kept small and processed/cleaned up one at a time so memory stays flat no matter how long the set is.`, 'header');
+    log(`Encoding ${numSafetySegs} piece(s) — kept small and processed/cleaned up one at a time so memory stays flat no matter how long the set is.`, 'header');
   } else {
     log('Encoding (pitch shift + noise reduction chain)…', 'header');
   }
@@ -1534,79 +1586,31 @@ async function processOne(file, idx, total, opts){
   const failedSafetySegs = [];
   let cumulativeEncodedStart = 0;
   for(let c = 0; c < numSafetySegs; c++){
-    const isLastSeg = c === numSafetySegs - 1;
-    const start = c * SAFETY_SEGMENT_SRC_SECS;
-    // Only cap non-final pieces by the probed duration. The final piece
-    // intentionally has no -t limit below — see note above this loop.
-    const dur = (srcDur && !isLastSeg) ? Math.min(SAFETY_SEGMENT_SRC_SECS, srcDur - start) : undefined;
-    if(srcDur && dur !== undefined && dur <= 0.05) break;
+    const rawName = rawSegNames[c];
     const partName = `${baseName}_enc${c+1}.wav`;
     const label = numSafetySegs > 1
       ? `(${idx+1}/${total}) ${file.name} — encoding piece ${c+1}/${numSafetySegs}`
       : `(${idx+1}/${total}) ${file.name}`;
     setStatus(label);
-    if(numSafetySegs > 1) log(`\n-- Encoding piece ${c+1}/${numSafetySegs} (source ${fmtTime(start)}${dur?` → ${fmtTime(start+dur)}`:''}) --`, 'header');
-
-    // Two-stage seek per piece:
-    //   1) Coarse seek on the ORIGINAL (possibly compressed) source, backed
-    //      off by a margin before `start` and extended by a margin past the
-    //      piece's end. Byte-estimated seeking on formats like MP3 can be a
-    //      bit off, so this margin exists purely to absorb that inaccuracy —
-    //      it does NOT need to be exact.
-    //   2) An exact re-seek to `start` *within* that now-decoded (PCM) raw
-    //      piece, which — unlike the compressed source — seeks perfectly,
-    //      before the filter chain runs.
-    // Net effect: sample-accurate cuts, same as decoding the whole file up
-    // front used to guarantee, but with only ~1 piece's worth of raw audio
-    // (a few minutes, not hours) ever resident in memory at a time.
-    const PREROLL = numSafetySegs > 1 ? Math.min(20, start) : 0;
-    const POSTROLL = (numSafetySegs > 1 && dur !== undefined) ? 20 : 0;
-    const rawStart = Math.max(0, start - PREROLL);
-    const exactOffset = start - rawStart;
-    const rawDur = dur !== undefined ? (exactOffset + dur + POSTROLL) : undefined;
-    const rawName = `${baseName}_raw${c+1}.wav`;
+    if(numSafetySegs > 1) log(`\n-- Encoding piece ${c+1}/${numSafetySegs} --`, 'header');
 
     let segOk = false;
     for(let attempt=0; attempt<2 && !segOk; attempt++){
       try{
-        setLiveProgress(dur || srcDur, label);
+        setLiveProgress(SAFETY_SEGMENT_SRC_SECS, label);
         const segStartT = performance.now();
 
-        const rawArgs = ['-y'];
-        if(rawStart > 0) rawArgs.push('-ss', rawStart.toFixed(6));
-        rawArgs.push('-i', inName);
-        if(rawDur !== undefined) rawArgs.push('-t', rawDur.toFixed(6));
-        rawArgs.push('-ar', '44100', '-codec:a', 'pcm_s16le', rawName);
-        await ffrun(rawArgs);
-
-        const rawProbeOut = await ffrun(['-i', rawName]);
-        const rawActualDur = parseDuration(rawProbeOut) || 0;
-        // Clamp to what actually got decoded, in case the source's own
-        // metadata over-reported its length (see the note further below).
-        const segDur = dur !== undefined
-          ? Math.max(0, Math.min(dur, rawActualDur - exactOffset))
-          : Math.max(0, rawActualDur - exactOffset);
-
-        const segArgs = ['-y'];
-        if(exactOffset > 0) segArgs.push('-ss', exactOffset.toFixed(6));
-        segArgs.push('-i', rawName);
-        if(segDur > 0) segArgs.push('-t', segDur.toFixed(6));
-        // pcm_s16le, not f32le — halves the memory footprint of every piece
-        // in flight, with no audible cost here since the final output is
-        // re-encoded to your chosen (usually lossy) format anyway.
-        segArgs.push('-af', chain, '-ar', '44100', '-codec:a', 'pcm_s16le', partName);
+        // Decode this one small piece start-to-finish — no seeking needed,
+        // since the pre-split pass above already cut it to the right range.
+        const segArgs = ['-y', '-i', rawName, '-af', chain, '-ar', '44100', '-codec:a', 'pcm_s16le', partName];
         await ffrun(segArgs);
-        await ffmpeg.deleteFile(rawName).catch(()=>{});
         clearLiveProgress();
         setBar('stageBar', (c+1)/numSafetySegs);
 
         const segDurOut = await ffrun(['-i', partName]);
         const segEncodedDur = parseDuration(segDurOut) || 0;
-        // Sanity check: if this piece came out drastically shorter than
-        // requested, treat it as a failed/corrupted piece rather than
-        // silently accepting missing or truncated audio.
-        if(dur !== undefined && dur > 1 && segEncodedDur < dur * 0.5){
-          throw new Error(`piece decoded far shorter than expected (${fmtTime(segEncodedDur)} of ${fmtTime(dur)}) — likely a corrupted/truncated decode`);
+        if(segEncodedDur < 0.1){
+          throw new Error('piece decoded to (near-)zero length — likely a corrupted/failed decode');
         }
         segMeta.push({ name: partName, start: cumulativeEncodedStart, dur: segEncodedDur });
         cumulativeEncodedStart += segEncodedDur;
@@ -1623,19 +1627,18 @@ async function processOne(file, idx, total, opts){
         }
       }catch(err){
         clearLiveProgress();
-        await ffmpeg.deleteFile(rawName).catch(()=>{});
         await ffmpeg.deleteFile(partName).catch(()=>{});
         const msg = (err && (err.message || (err.toString && err.toString()))) || 'unknown error (no message from the encoder)';
         if(attempt === 0){
           log(`   Piece ${c+1}/${numSafetySegs} failed: ${msg} — retrying once before giving up on it.`, 'warning');
         } else {
           log(`   Piece ${c+1}/${numSafetySegs} failed again: ${msg} — skipping and continuing.`, 'critical');
-          failedSafetySegs.push({ piece: c+1, start, dur: dur !== undefined ? dur : (srcDur ? srcDur - start : undefined) });
+          failedSafetySegs.push({ piece: c+1 });
         }
       }
     }
+    await ffmpeg.deleteFile(rawName).catch(()=>{});
   }
-  await ffmpeg.deleteFile(inName).catch(()=>{});
 
   if(segMeta.length === 0){
     log(`   Nothing encoded for ${file.name} — every piece failed.`, 'critical');
@@ -1643,12 +1646,13 @@ async function processOne(file, idx, total, opts){
   }
 
   const fullDur = cumulativeEncodedStart;
-  log(`   Duration on disk: ${fmtTime(fullDur)} (plays as ${fmtTime(fullDur*PLAYBACK_SPEED)} in Roblox)`, 'info');
-  if(srcDur && Math.abs(fullDur - srcDur) > 2){
-    log(`   Note: the source file's own metadata said ${fmtTime(srcDur)}, but ${fmtTime(fullDur)} of audio was ` +
+  const fullDurAsSourceTime = fullDur / PLAYBACK_SPEED;
+  log(`   Duration on disk: ${fmtTime(fullDur)} (plays as ${fmtTime(fullDurAsSourceTime)} in Roblox)`, 'info');
+  if(srcDur && Math.abs(fullDurAsSourceTime - srcDur) > 2){
+    log(`   Note: the source file's own metadata said ${fmtTime(srcDur)}, but ${fmtTime(fullDurAsSourceTime)} of audio was ` +
       `actually decoded — MP3 files (especially from phone/DJ-app recordings) can under- or over-report their ` +
       `own length in their header; the file was fully decoded to its real end rather than trusting that number, ` +
-      `so ${fmtTime(fullDur)} is what's actually being used.`, 'warning');
+      `so ${fmtTime(fullDurAsSourceTime)} is what's actually being used.`, 'warning');
   }
 
   // QC peak-level check, sampled from the first segment only — cheap, and a
@@ -1718,7 +1722,15 @@ async function processOne(file, idx, total, opts){
   }
 
   if(opts.split){
-    const chunkSecs = (opts.splitMin*60) / PLAYBACK_SPEED;
+    // chunkSecs must be in the same domain as fullDur (measured ON-DISK/
+    // encoded duration). The on-disk file is PLAYBACK_SPEED times LONGER
+    // than what Roblox actually plays it back as, so converting a desired
+    // Roblox-playback chunk length to its on-disk length means multiplying
+    // by PLAYBACK_SPEED, not dividing. (Dividing here was the actual bug
+    // behind sets coming out as dozens of ~45-second slivers instead of the
+    // requested chunk length, which is what "cuts off partway through" and
+    // "way more parts than expected" looked like from the outside.)
+    const chunkSecs = (opts.splitMin*60) * PLAYBACK_SPEED;
     const numChunks = Math.max(1, Math.ceil(fullDur / chunkSecs));
     log(`Splitting into ${numChunks} chunk(s) of ${opts.splitMin} min (Roblox time) each…`, 'header');
     const failedChunks = [];
@@ -1740,7 +1752,7 @@ async function processOne(file, idx, total, opts){
           await extractRange(outName, start, dur);
           const data = await ffmpeg.readFile(outName);
           outputs.push({name: outName, blob: new Blob([data.buffer], {type:'audio/'+ext})});
-          log(`   ${outName} ✓ (${fmtTime(dur)} on disk → ${fmtTime(dur*PLAYBACK_SPEED)} in Roblox)`, 'good');
+          log(`   ${outName} ✓ (${fmtTime(dur)} on disk → ${fmtTime(dur/PLAYBACK_SPEED)} in Roblox)`, 'good');
           if(opts.autoUpload) queueAutoUpload(outputs[outputs.length-1]);
           chunkOk = true;
         }catch(err){
@@ -1787,10 +1799,10 @@ async function processOne(file, idx, total, opts){
   setBar('fileBar', (idx+1)/total);
   const totalTook = (performance.now()-jobStart)/1000;
   if(failedSafetySegs.length){
-    const ranges = failedSafetySegs.map(f => `${fmtTime(f.start)}–${f.dur !== undefined ? fmtTime(f.start+f.dur) : 'end'} (source-time)`).join(', ');
+    const pieces = failedSafetySegs.map(f => `#${f.piece}`).join(', ');
     log(`${file.name} -> ${outputs.length} file(s) in ${totalTook.toFixed(1)}s — ` +
-      `${failedSafetySegs.length} internal piece(s) failed and were skipped, so the following is MISSING ` +
-      `from the output: ${ranges}. Try again — this should be rare now that pieces are sized much smaller.`, 'critical');
+      `${failedSafetySegs.length} internal piece(s) failed and were skipped (piece ${pieces} of ${numSafetySegs}), so that part of the set ` +
+      `is MISSING from the output. Try again — this should be rare now that pieces are pre-split without seeking.`, 'critical');
   } else {
     log(`${file.name} -> ${outputs.length} file(s) in ${totalTook.toFixed(1)}s`, 'good');
   }
