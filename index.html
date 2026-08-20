@@ -353,12 +353,12 @@
         <label>Split Into Chunks</label>
         <div class="row-inline">
           <div class="switch on" id="splitSwitch"><div class="knob"></div></div>
-          <span style="font-size:0.8rem; color:var(--text-dim);">Target length per chunk (Roblox minutes):</span>
+          <span style="font-size:0.8rem; color:var(--text-dim);">Time per uploaded audio part (minutes) — keep under Roblox's per-file upload limit:</span>
           <input type="number" id="splitMin" value="6.5" step="0.1" min="0.5" style="width:80px;">
         </div>
         <div class="settings-note" id="chunkSizeNote" style="margin-top:8px;"></div>
       </div>
-      <div class="note">Pitch is shifted down <b>2.941×</b> on export. Set <b>Sound.PlaybackSpeed</b> to <b>2.941</b> in Roblox to restore it — the companion player script does this automatically.</div>
+      <div class="note">Pitch is shifted down <b>2.941×</b> on export, which is why the audio takes longer to upload/play back on disk than it does once Roblox plays it — set <b>Sound.PlaybackSpeed</b> to <b>2.941</b> in Roblox to restore the original pitch and length. The companion player script does this automatically.</div>
     </div>
 
     <div class="panel">
@@ -1137,7 +1137,7 @@ function updateChunkSizeNote(){
   const fmt = document.getElementById('fmtSel').value;
   const bitrateKbps = {ogg_hq:384, ogg_std:256, ogg:256, mp3:190, wav:1411}[fmt] ?? 256;
   const splitMin = parseFloat(splitMinEl.value) || 0;
-  const encodedSecs = (splitMin*60) * PLAYBACK_SPEED; // actual on-disk duration per chunk — on-disk is PLAYBACK_SPEED times LONGER than what Roblox actually plays back
+  const encodedSecs = splitMin*60; // target length IS the on-disk/uploaded-file duration per part
   const estMB = (bitrateKbps*1000/8 * encodedSecs) / (1024*1024);
   const VERCEL_LIMIT_MB = 4.5;
   if(!splitOn){ note.textContent = ''; return; }
@@ -1512,13 +1512,14 @@ async function processOne(file, idx, total, opts){
   const SAFETY_TRIGGER_SRC_SECS = 12 * 60; // below this, one pass is already well within safe memory — no need to chunk at all
   let SAFETY_SEGMENT_SRC_SECS = DESIRED_SEGMENT_SECS;
   if(opts.split){
-    // Source-time length of one final Roblox-length chunk. The on-disk
-    // (encoded) file is PLAYBACK_SPEED times LONGER than the source cut
-    // that produced it (asetrate/aresample bakes in the pitch-down), and
-    // Roblox then plays it back PLAYBACK_SPEED times FASTER — those two
-    // cancel out, so a chunk's Roblox-playback length equals its SOURCE
-    // length directly. No PLAYBACK_SPEED factor belongs here at all.
-    const chunkSecsForAlign = opts.splitMin*60;
+    // Source-time length that produces one target-length final part. The
+    // target ("Target length per part") is measured in ON-DISK/uploaded-file
+    // minutes (what Roblox's own per-file upload cap actually limits), and
+    // the on-disk file is PLAYBACK_SPEED times LONGER than the source-time
+    // cut that produced it (asetrate/aresample bakes in the pitch-down) —
+    // so the matching source-time length is the target divided by
+    // PLAYBACK_SPEED.
+    const chunkSecsForAlign = (opts.splitMin*60) / PLAYBACK_SPEED;
     const chunksPerSegment = Math.max(1, Math.round(DESIRED_SEGMENT_SECS / chunkSecsForAlign));
     SAFETY_SEGMENT_SRC_SECS = chunksPerSegment * chunkSecsForAlign;
   }
@@ -1722,17 +1723,13 @@ async function processOne(file, idx, total, opts){
   }
 
   if(opts.split){
-    // chunkSecs must be in the same domain as fullDur (measured ON-DISK/
-    // encoded duration). The on-disk file is PLAYBACK_SPEED times LONGER
-    // than what Roblox actually plays it back as, so converting a desired
-    // Roblox-playback chunk length to its on-disk length means multiplying
-    // by PLAYBACK_SPEED, not dividing. (Dividing here was the actual bug
-    // behind sets coming out as dozens of ~45-second slivers instead of the
-    // requested chunk length, which is what "cuts off partway through" and
-    // "way more parts than expected" looked like from the outside.)
-    const chunkSecs = (opts.splitMin*60) * PLAYBACK_SPEED;
+    // The target length is the length of the actual UPLOADED file (what
+    // Roblox's per-file duration cap limits) — it's already in the same
+    // domain as fullDur (measured on-disk/encoded duration), so it's used
+    // directly with no PLAYBACK_SPEED conversion.
+    const chunkSecs = opts.splitMin*60;
     const numChunks = Math.max(1, Math.ceil(fullDur / chunkSecs));
-    log(`Splitting into ${numChunks} chunk(s) of ${opts.splitMin} min (Roblox time) each…`, 'header');
+    log(`Splitting into ${numChunks} part(s) of ${opts.splitMin} min (time per uploaded audio part) each…`, 'header');
     const failedChunks = [];
     // Zero-padded so these sort correctly by plain alphabetical order —
     // not just "natural"/numeric order — anywhere they end up: a file
@@ -1741,20 +1738,31 @@ async function processOne(file, idx, total, opts){
     // after "part9". Unpadded names looked fine right up until a set had 10+
     // chunks, at which point e.g. part24 would sort right after part2.
     const partPad = String(numChunks).length;
+    // Tracks exactly what got covered, in the order chunks were actually
+    // produced, so the verification pass below can confirm — not just
+    // assume — that the parts are contiguous, strictly in order, and add up
+    // to the whole set with no gaps, no overlaps, and nothing duplicated.
+    const coverage = [];
     for(let c=0;c<numChunks;c++){
       const start = c*chunkSecs;
       const dur = Math.min(chunkSecs, fullDur - start);
       if(dur <= 0.05) break;
       const outName = `${baseName}_part${String(c+1).padStart(partPad,'0')}.${ext}`;
+      // Roblox-playback timestamps (source-time domain) this part covers,
+      // for the human-readable range in the log below — e.g. "4:26–6:38".
+      const robloxStart = start / PLAYBACK_SPEED;
+      const robloxEnd = (start + dur) / PLAYBACK_SPEED;
       let chunkOk = false;
       for(let attempt=0; attempt<2 && !chunkOk; attempt++){
         try{
           await extractRange(outName, start, dur);
           const data = await ffmpeg.readFile(outName);
           outputs.push({name: outName, blob: new Blob([data.buffer], {type:'audio/'+ext})});
-          log(`   ${outName} ✓ (${fmtTime(dur)} on disk → ${fmtTime(dur/PLAYBACK_SPEED)} in Roblox)`, 'good');
+          log(`   ${outName} ✓ — covers ${fmtTime(robloxStart)}–${fmtTime(robloxEnd)} of the set ` +
+            `(${fmtTime(dur)} on disk → ${fmtTime(dur/PLAYBACK_SPEED)} in Roblox)`, 'good');
           if(opts.autoUpload) queueAutoUpload(outputs[outputs.length-1]);
           chunkOk = true;
+          coverage.push({ part: c+1, start, dur, robloxStart, robloxEnd });
         }catch(err){
           const msg = (err && (err.message || (err.toString && err.toString()))) || 'unknown error (no message from the encoder)';
           await ffmpeg.deleteFile(outName).catch(()=>{});
@@ -1777,6 +1785,62 @@ async function processOne(file, idx, total, opts){
         `re-running just this file (or lowering chunk length) may help if it was a memory hiccup.`, 'warning');
     }
     await freeSegmentsBefore(segMeta.length);
+
+    // ---- Verification pass ----
+    // Actually checks — rather than assumes — that what got produced is
+    // complete, in order, and gapless, instead of just trusting the loop
+    // above ran cleanly.
+    log('\n-- Verifying coverage: full set, in order, no gaps or overlaps --', 'header');
+    let verifyOk = true;
+    // 1) Strictly ascending, non-overlapping, contiguous order — parts are
+    //    generated sequentially above, but this checks the actual recorded
+    //    coverage rather than assuming the loop behaved.
+    for(let i=1;i<coverage.length;i++){
+      const prev = coverage[i-1], cur = coverage[i];
+      if(cur.part !== prev.part+1){
+        log(`   ✗ Parts out of sequence: part ${prev.part} is immediately followed by part ${cur.part}, not ${prev.part+1}.`, 'critical');
+        verifyOk = false;
+      }
+      const gap = cur.start - (prev.start + prev.dur);
+      if(Math.abs(gap) > 0.15){
+        log(`   ✗ ${gap > 0 ? 'Gap' : 'Overlap'} between part ${prev.part} and part ${cur.part}: ` +
+          `part ${prev.part} ends at ${fmtTime(prev.robloxEnd)} but part ${cur.part} starts at ${fmtTime(cur.robloxStart)}.`, 'critical');
+        verifyOk = false;
+      }
+    }
+    // 2) First part starts at 0:00, last part ends at the true full length.
+    if(coverage.length){
+      const first = coverage[0], last = coverage[coverage.length-1];
+      if(first.start > 0.15){
+        log(`   ✗ First part doesn't start at the beginning of the set (starts at ${fmtTime(first.robloxStart)}).`, 'critical');
+        verifyOk = false;
+      }
+      const missingTail = fullDur - (last.start + last.dur);
+      if(missingTail > 0.15){
+        log(`   ✗ Last produced part ends at ${fmtTime(last.robloxEnd)}, but the set runs to ${fmtTime(fullDur/PLAYBACK_SPEED)} — ` +
+          `${fmtTime(missingTail/PLAYBACK_SPEED)} at the end is missing (almost certainly from ${failedChunks.length ? 'the failed part(s) above' : 'a part that failed silently'}).`, 'critical');
+        verifyOk = false;
+      }
+    } else {
+      log('   ✗ No parts were produced at all.', 'critical');
+      verifyOk = false;
+    }
+    // 3) Total covered on-disk duration adds up to the full processed show.
+    const totalCovered = coverage.reduce((sum,p)=>sum+p.dur, 0);
+    if(Math.abs(totalCovered - fullDur) > 0.15 * numChunks){
+      log(`   ✗ Parts cover ${fmtTime(totalCovered/PLAYBACK_SPEED)} total, but the full set is ${fmtTime(fullDur/PLAYBACK_SPEED)} — ` +
+        `${fmtTime((fullDur-totalCovered)/PLAYBACK_SPEED)} unaccounted for.`, 'critical');
+      verifyOk = false;
+    }
+    if(failedChunks.length){
+      verifyOk = false; // already logged above, but make sure this fails the overall check too
+    }
+    if(verifyOk){
+      log(`   ✓ Verified: ${coverage.length} part(s), in order, no gaps or overlaps, covering the complete ` +
+        `${fmtTime(fullDur/PLAYBACK_SPEED)} set from 0:00 to ${fmtTime(coverage[coverage.length-1].robloxEnd)}.`, 'good');
+    } else {
+      log(`   ✗ Verification FAILED for ${file.name} — see the issue(s) above. Do not upload this set as-is; re-run this file.`, 'critical');
+    }
   } else {
     // Single-file output: concat all segments straight into the target
     // codec in one pass (no separate giant lossless intermediate written to
