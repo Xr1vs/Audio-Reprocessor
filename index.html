@@ -1366,21 +1366,23 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
   if(mode === 'concert'){
     filters.push('alimiter=level_in=1:level_out=1:limit=0.80:attack=0.5:release=30:level=disabled');
     filters.push('highpass=f=40:poles=2', 'highpass=f=20:poles=1');
-    // One afftdn pass per level, not several chained together. Stacking
-    // multiple full-strength spectral-denoise passes (as this used to do,
-    // up to 3 in a row on "max") is a classic way to create "musical noise" —
-    // a warbly, static-like artifact that's actually introduced by the
-    // over-processing itself, not removed by it.
-    const nrMap = {off:'afftdn=nr=8:nf=-35:nt=w:om=o', light:'afftdn=nr=14:nf=-42:nt=w:om=o', medium:'afftdn=nr=22:nf=-48:nt=w:om=o', strong:'afftdn=nr=30:nf=-52:nt=w:om=o', max:'afftdn=nr=44:nf=-60:nt=w:om=o'};
-    filters.push(nrMap[noiseReduction]);
-    const anlm = {off:0.0003, light:0.0004, medium:0.0010, strong:0.0018, max:0.0040}[noiseReduction];
-    filters.push(`anlmdn=s=${anlm}:p=0.002:r=0.004:m=15`);
-    if(noiseReduction==='medium'||noiseReduction==='strong'||noiseReduction==='max') filters.push('equalizer=f=10000:t=h:w=0.5:g=1.5');
-    // Extra de-hiss high-shelf trim, only on max — takes a bit more off the
-    // very top of the band (above most vocal/instrument content) where
-    // residual hiss/static tends to live after the afftdn/anlmdn passes.
-    if(noiseReduction==='max') filters.push('equalizer=f=12000:t=h:w=0.7:g=-6');
-    filters.push('lowpass=f=16000:poles=2', 'lowpass=f=15000:poles=2');
+    // Pushed hard, deliberately past the point where "musical noise" (a
+    // warbly artifact from over-aggressive spectral denoise) starts to
+    // become a real tradeoff — static in a Roblox concert set is worse
+    // than a bit of a "processed" texture, so this leans as hard as
+    // possible toward eliminating noise entirely.
+    filters.push('afftdn=nr=75:nf=-70:nt=w:om=o');
+    filters.push('anlmdn=s=0.0090:p=0.003:r=0.006:m=15');
+    // NOTE: this used to include a +1.5dB boost around 10kHz for "air" —
+    // removed. Roblox's own EqualizerSoundEffect independently boosts high
+    // frequencies (often maxed out, +10dB or more) — that's exactly the
+    // band residual hiss/static lives in, so boosting it here was actively
+    // working against every other noise-reduction step in this chain.
+    // Aggressive, wide high-shelf cut instead — specifically targets the
+    // band Roblox's own EQ is about to amplify, so there's simply much less
+    // high-frequency noise left for that boost to bring back up.
+    filters.push('equalizer=f=9000:t=h:w=1.2:g=-14');
+    filters.push('lowpass=f=11000:poles=2', 'lowpass=f=11500:poles=2');
     // Replaces the old agate. Measured against a synthetic loud->fade->silent-tail
     // test signal: the previous gate (threshold=0.0015≈-56dBFS) barely reduced the
     // residual noise floor left after afftdn/anlmdn (which landed right around
@@ -1397,18 +1399,22 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
     // boost) makes even a "-90dBFS" residual floor clearly audible again once
     // amplified — -140dBFS leaves enough margin to stay inaudible even after
     // a heavy downstream boost. -30dB and up is still completely untouched.
-    if(noiseReduction !== 'off') filters.push('compand=attacks=0.01:decays=0.3:points=-90/-140|-55/-140|-45/-70|-30/-30|0/0:soft-knee=3');
+    filters.push('compand=attacks=0.01:decays=0.3:points=-90/-140|-55/-140|-45/-70|-30/-30|0/0:soft-knee=3');
+    // Second, independent line of defense specifically for SUSTAINED
+    // silence (song endings, gaps between songs, the tail of the set) — a
+    // real hard gate with a hold time, on top of the smooth expander above.
+    // The expander reacts fast per-sample; this catches anything that
+    // lingers just above its crush zone for an extended stretch and takes
+    // it the rest of the way to true digital silence. threshold=-50dBFS —
+    // still safely below the -30dBFS floor where real quiet music lives.
+    filters.push('agate=threshold=0.0032:ratio=20:attack=20:release=250:range=0.00001:knee=1');
     filters.push(`asetrate=${lowRate}`, 'aresample=44100:resampler=swr:filter_size=512:cutoff=0.93:precision=28');
   } else {
     filters.push('alimiter=level_in=1:level_out=1:limit=0.95:attack=1:release=50:level=disabled');
-    filters.push('highpass=f=20', 'lowpass=f=16000:poles=2', 'lowpass=f=15000:poles=2');
-    if(noiseReduction !== 'off'){
-      const nrMap = {light:'afftdn=nr=10:nf=-38:nt=w:om=o', medium:'afftdn=nr=16:nf=-44:nt=w:om=o', strong:'afftdn=nr=22:nf=-48:nt=w:om=o', max:'afftdn=nr=32:nf=-55:nt=w:om=o'};
-      filters.push(nrMap[noiseReduction]);
-      const s2 = {light:0.0004, medium:0.0007, strong:0.0012, max:0.0022}[noiseReduction];
-      filters.push(`anlmdn=s=${s2}:p=0.002:r=0.004:m=15`);
-      if(noiseReduction==='max') filters.push('equalizer=f=13000:t=h:w=0.7:g=-4');
-    }
+    filters.push('highpass=f=20', 'lowpass=f=13000:poles=2', 'lowpass=f=13500:poles=2');
+    filters.push('afftdn=nr=65:nf=-65:nt=w:om=o');
+    filters.push('anlmdn=s=0.0060:p=0.003:r=0.006:m=15');
+    filters.push('equalizer=f=9000:t=h:w=1.2:g=-10');
     filters.push(`asetrate=${lowRate}`, 'aresample=44100:resampler=swr:filter_size=512:cutoff=0.93:precision=28');
     // See the matching comment in concert mode above — this replaces a gate
     // that measured as barely reducing residual hiss (it sat right at the
@@ -1418,6 +1424,7 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
     // for the same reason as concert mode: needs to stay inaudible even
     // after a heavy downstream Roblox gain chain adds tens of dB back.
     filters.push('compand=attacks=0.01:decays=0.3:points=-90/-140|-55/-140|-45/-70|-30/-30|0/0:soft-knee=3');
+    filters.push('agate=threshold=0.0032:ratio=20:attack=20:release=250:range=0.00001:knee=1');
   }
   filters.push(`volume=${volLinear.toFixed(8)}`);
   filters.push('alimiter=level_in=1:level_out=1:limit=0.891:attack=5:release=50:level=disabled');
