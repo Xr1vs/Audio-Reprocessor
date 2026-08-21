@@ -1413,7 +1413,7 @@ function codecArgsFor(fmt){
   if(fmt==='ogg_hq') return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','384k']};
   if(fmt==='ogg_std'||fmt==='ogg') return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','256k']};
   if(fmt==='mp3') return {ext:'mp3', args:['-codec:a','libmp3lame','-q:a','0']};
-  if(fmt==='wav') return {ext:'wav', args:['-codec:a','pcm_s16le']};
+  if(fmt==='wav') return {ext:'wav', args:['-codec:a','pcm_s24le']};
   return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','256k']};
 }
 function extOf(name){ const m=name.match(/\.[^/.]+$/); return m?m[0]:'.dat'; }
@@ -1605,7 +1605,17 @@ async function processOne(file, idx, total, opts){
 
         // Decode this one small piece start-to-finish — no seeking needed,
         // since the pre-split pass above already cut it to the right range.
-        const segArgs = ['-y', '-i', rawName, '-af', chain, '-ar', '44100', '-codec:a', 'pcm_s16le', partName];
+        // 32-bit float, not 16-bit: the filter chain above ends by
+        // attenuating down to a deliberately quiet target level (to survive
+        // whatever gain your Roblox SoundEffect chain adds back on top).
+        // 16-bit PCM only has ~96 dB of total dynamic range, so at a quiet
+        // target level there isn't much real resolution left for the actual
+        // audio — the quantization noise itself becomes audible once
+        // amplified back up in Roblox. Float32 has no meaningful
+        // quantization floor at any level used here, so nothing is lost
+        // here — whatever precision loss happens, happens once, at the
+        // final lossy encode step below, not twice.
+        const segArgs = ['-y', '-i', rawName, '-af', chain, '-ar', '44100', '-codec:a', 'pcm_f32le', partName];
         await ffrun(segArgs);
         clearLiveProgress();
         setBar('stageBar', (c+1)/numSafetySegs);
@@ -1710,7 +1720,7 @@ async function processOne(file, idx, total, opts){
           // a tiny duplicated/dropped sliver right at the segment boundary.
           // Re-encoding PCM->PCM is trivial (no real "encoding" happening,
           // it's already uncompressed) and is exact.
-          await ffrun(['-y','-ss', segLocalStart.toFixed(6), '-i', seg.name, '-t', subDur.toFixed(6), '-codec:a','pcm_s16le', subName]);
+          await ffrun(['-y','-ss', segLocalStart.toFixed(6), '-i', seg.name, '-t', subDur.toFixed(6), '-codec:a','pcm_f32le', subName]);
           subNames.push(subName);
         }
         await ffmpeg.writeFile(listName, new TextEncoder().encode(subNames.map(n=>`file '${n}'`).join('\n')+'\n'));
