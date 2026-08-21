@@ -1431,11 +1431,24 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
   return filters.join(',');
 }
 function codecArgsFor(fmt){
-  if(fmt==='ogg_hq') return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','384k']};
-  if(fmt==='ogg_std'||fmt==='ogg') return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','256k']};
-  if(fmt==='mp3') return {ext:'mp3', args:['-codec:a','libmp3lame','-q:a','0']};
+  // Forced near-CBR (minrate/maxrate pinned to the target), not adaptive
+  // VBR. VBR chooses bits based on how much precision the codec's
+  // psychoacoustic model thinks is "needed" for THIS signal at ITS
+  // CURRENT (deliberately quiet, pre-Roblox-boost) loudness — it has no
+  // way to know the file is about to be amplified tens of dB after
+  // decoding, so left to its own judgement it spends far fewer bits than
+  // the content will actually need once boosted. Measured on a real file:
+  // requesting 256k VBR actually produced ~82kbit/s; forcing CBR at the
+  // same target reliably delivers the full requested bitrate.
+  // 380k, not higher — at Roblox's own 7-minute cap, anything above ~400k
+  // pushes the file past Roblox's separate 20MB size cap (500k would be
+  // ~25MB at 7:00). 380k stays under 20MB with margin even at the full
+  // 7 minutes.
+  if(fmt==='ogg_hq') return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','380k','-minrate','380k','-maxrate','380k']};
+  if(fmt==='ogg_std'||fmt==='ogg') return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','320k','-minrate','320k','-maxrate','320k']};
+  if(fmt==='mp3') return {ext:'mp3', args:['-codec:a','libmp3lame','-b:a','320k','-abr','0']};
   if(fmt==='wav') return {ext:'wav', args:['-codec:a','pcm_s24le']};
-  return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','256k']};
+  return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','320k','-minrate','320k','-maxrate','320k']};
 }
 function extOf(name){ const m=name.match(/\.[^/.]+$/); return m?m[0]:'.dat'; }
 
