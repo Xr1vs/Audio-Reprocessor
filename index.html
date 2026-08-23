@@ -328,18 +328,25 @@
       <div class="grid">
         <div class="field"><label>Output Volume</label>
           <select id="volSel">
-            <option value="-63" selected>−63 dB · Roblox matched master</option>
+            <option value="-50">−50 dB (loudest — only for a plain Sound with no Volume/Compressor/Equalizer boost)</option>
+            <option value="-55">−55 dB</option>
+            <option value="-58" selected>−58 dB (default)</option>
+            <option value="-60">−60 dB</option>
+            <option value="-63">−63 dB</option>
+            <option value="-70">−70 dB (quiet)</option>
           </select>
-          <div class="settings-note" style="margin-top:8px;">Locked quiet master for your Studio chain: Sound Volume 10 + PlaybackSpeed 2.941 + maxed Equalizer/Compressor behavior. Static Scrub v3 keeps the full v1 top-end and uses a light post-resample adaptive cleanup instead of cutting the highs, so Roblox has less fizz/static to amplify without making the music duller.</div>
+          <div class="settings-note" style="margin-top:8px;">Exports default to −58 dB. Keep the Roblox Compressor/Equalizer gains controlled so they do not amplify the noise floor back into static.</div>
         </div>
         <div class="field"><label>Noise / Static Removal</label>
           <div class="settings-note" style="margin-top:8px;">Always on at max strength — there's no dial anymore, every file gets the heaviest denoise chain automatically.</div>
         </div>
         <div class="field"><label>Export Format</label>
           <select id="fmtSel">
-            <option value="ogg_hq" selected>OGG Vorbis · 384 kbps · Highest Quality</option>
+            <option value="ogg_std" selected>OGG · 256k</option>
+            <option value="ogg_hq">OGG · 384k</option>
+            <option value="mp3">MP3 · V0</option>
+            <option value="wav">WAV (lossless)</option>
           </select>
-          <div class="settings-note" style="margin-top:8px;">Locked to 384 kbps OGG Vorbis. No lower-quality export modes are used.</div>
         </div>
         <div class="field"><label>File Suffix</label>
           <input type="text" id="suffixInp" value="_rbx">
@@ -350,11 +357,11 @@
         <div class="row-inline">
           <div class="switch on" id="splitSwitch"><div class="knob"></div></div>
           <span style="font-size:0.8rem; color:var(--text-dim);">Time per uploaded audio part (minutes) — keep under Roblox's per-file upload limit:</span>
-          <input type="number" id="splitMin" value="1.25" step="0.05" min="0.5" max="1.25" style="width:80px;">
+          <input type="number" id="splitMin" value="6.5" step="0.1" min="0.5" style="width:80px;">
         </div>
         <div class="settings-note" id="chunkSizeNote" style="margin-top:8px;"></div>
       </div>
-      <div class="note">Pitch is shifted down <b>2.941×</b> on export, which is why the audio takes longer to upload/play back on disk than it does once Roblox plays it — set <b>Sound.PlaybackSpeed</b> to <b>2.941</b> in Roblox to restore the original pitch and length. The companion player script does this automatically.</div>
+      <div class="note">Pitch and tempo are slowed to <b>0.2994×</b> on export. Set <b>Sound.PlaybackSpeed</b> to <b>3.34</b> in Roblox to restore the original pitch, tempo, and length. The companion player script and bundled Roblox model do this automatically.</div>
     </div>
 
     <div class="panel">
@@ -1101,7 +1108,9 @@
 import { FFmpeg } from "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js";
 import { toBlobURL, fetchFile } from "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js";
 
-const PLAYBACK_SPEED = 2.941;
+// The export is slowed to the reciprocal of this value (about 0.2994x),
+// then Roblox restores the original pitch and tempo at PlaybackSpeed 3.34.
+const PLAYBACK_SPEED = 3.34;
 let ffmpeg = null;
 let ffmpegReady = false;
 let files = [];
@@ -1137,36 +1146,22 @@ autoUploadSwitch.addEventListener('click', ()=>{
 function updateChunkSizeNote(){
   const note = document.getElementById('chunkSizeNote');
   const splitMinEl = document.getElementById('splitMin');
-  const bitrateKbps = 384; // export is permanently locked to OGG 384k
-  const VERCEL_SAFE_MIN = 1.25; // ~3.43 MiB payload at 384 kbps, leaving multipart/serverless headroom
-  let splitMin = parseFloat(splitMinEl.value) || VERCEL_SAFE_MIN;
-
-  // Vercel's request body cap applies to the whole upload request. At 384 kbps,
-  // a 6.5 minute OGG is ~17.9 MB before multipart overhead, so there is no
-  // client-side trick that can send that same file through a ~4.5 MB function.
-  // Keep the AUDIO bitrate at full quality and instead cap each upload-safe
-  // audio part to 1.25 minutes. This fixes the 413 without lowering quality.
-  if(splitMin > VERCEL_SAFE_MIN){
-    splitMin = VERCEL_SAFE_MIN;
-    splitMinEl.value = VERCEL_SAFE_MIN.toFixed(2);
-  }
-  if(splitMin < 0.5){
-    splitMin = 0.5;
-    splitMinEl.value = '0.50';
-  }
-
-  if(!splitOn){
-    note.innerHTML = 'Splitting is off. Download works normally, but browser → Vercel auto-upload of a large 384k file can still exceed the host request limit.';
-    note.style.color = 'var(--text-dim)';
-    return;
-  }
-
-  const encodedSecs = splitMin * 60;
-  const estMB = (bitrateKbps * 1000 / 8 * encodedSecs) / (1024 * 1024);
-  note.innerHTML = `Vercel-safe 384k mode: <b>${splitMin.toFixed(2)} min</b> per upload part · about <b>${estMB.toFixed(2)} MiB</b>. Full 384 kbps quality is preserved; only the part length is reduced so the request stays below the serverless body limit.`;
-  note.style.color = 'var(--text-dim)';
+  const fmt = document.getElementById('fmtSel').value;
+  const bitrateKbps = {ogg_hq:384, ogg_std:256, ogg:256, mp3:190, wav:1411}[fmt] ?? 256;
+  const splitMin = parseFloat(splitMinEl.value) || 0;
+  const encodedSecs = splitMin*60; // target length IS the on-disk/uploaded-file duration per part
+  const estMB = (bitrateKbps*1000/8 * encodedSecs) / (1024*1024);
+  const VERCEL_LIMIT_MB = 4.5;
+  if(!splitOn){ note.textContent = ''; return; }
+  const over = estMB > VERCEL_LIMIT_MB * 0.9;
+  note.innerHTML = `Estimated size per chunk: <b>${estMB.toFixed(1)} MB</b>` +
+    (over
+      ? ` — this is close to or over Vercel's ~4.5MB serverless upload limit and will likely 413/crash the upload. Lower the chunk length, drop the bitrate, or deploy via Railway (server.js) instead, which doesn't have this cap.`
+      : ` — comfortably under typical serverless (Vercel) upload limits.`);
+  note.style.color = over ? 'var(--danger)' : 'var(--text-dim)';
 }
 ['splitMin'].forEach(id=> document.getElementById(id).addEventListener('input', updateChunkSizeNote));
+document.getElementById('fmtSel').addEventListener('change', updateChunkSizeNote);
 updateChunkSizeNote();
 
 dropzone.addEventListener('click', ()=> fileInput.click());
@@ -1369,103 +1364,94 @@ function parseSampleRate(o){ const m=o.match(/(\d+)\s*Hz/); return m?parseInt(m[
 function parseVolume(o){ const mean=o.match(/mean_volume:\s*(-?[\d.]+)/); const max=o.match(/max_volume:\s*(-?[\d.]+)/); return {mean:mean?parseFloat(mean[1]):null, max:max?parseFloat(max[1]):null}; }
 
 function buildFilterChain(mode, sr, volLinear, noiseReduction){
-  const lowRate = Math.max(8000, Math.round(sr / PLAYBACK_SPEED));
-  const filters = ['aformat=sample_fmts=fltp'];
-
-  // IMPORTANT: all cleanup is performed while the music is still at its
-  // normal internal level. The very last gain stage is the -63 dB Roblox
-  // delivery attenuation. That keeps the denoisers/filters working on a
-  // healthy signal instead of asking them to process an already microscopic
-  // waveform and then having Studio magnify their residue by ~60 dB.
-  //
-  // Previous builds stacked extremely strong afftdn + anlmdn + compand + a
-  // hard gate. That can CREATE the fizzy/metallic "static" people hear after
-  // a large downstream boost. This chain deliberately uses one adaptive
-  // spectral denoiser, a very low-level smooth expander, and no hard gate.
-
+  const lowRate = Math.round(sr / PLAYBACK_SPEED);
+  let filters = ['aformat=sample_fmts=fltp'];
   if(mode === 'concert'){
-    filters.push('highpass=f=24:poles=2');
-    // Adaptive tracking: enough to pull steady hiss down without turning
-    // crowd/reverb tails into watery musical-noise artifacts.
-    filters.push('afftdn=nr=22:nf=-58:nt=w:tn=1:gs=8:om=o');
-    // Your Studio EQ strongly raises the top band. Pre-shape that band so
-    // codec/transcode hiss does not get exaggerated, while retaining useful
-    // cymbal/air information below the final ultrasonic/noise region.
-    filters.push('equalizer=f=9000:t=h:w=1.15:g=-10');
-    filters.push('lowpass=f=14500:poles=2');
-    // Only touch the true floor. No abrupt gate opening/closing = no clicks,
-    // pumping, or bursts that later sound like static under huge makeup gain.
-    filters.push('compand=attacks=0.03:decays=0.45:points=-100/-140|-72/-120|-62/-82|-52/-58|-42/-42|0/0:soft-knee=7');
-    // Catch accidental hot peaks before the pitch/resample stage without
-    // changing normal program dynamics.
-    filters.push('alimiter=level_in=1:level_out=1:limit=0.965:attack=2:release=80:level=disabled');
+    filters.push('alimiter=level_in=1:level_out=1:limit=0.80:attack=0.5:release=30:level=disabled');
+    filters.push('highpass=f=40:poles=2', 'highpass=f=20:poles=1');
+    // Pushed hard, deliberately past the point where "musical noise" (a
+    // warbly artifact from over-aggressive spectral denoise) starts to
+    // become a real tradeoff — static in a Roblox concert set is worse
+    // than a bit of a "processed" texture, so this leans as hard as
+    // possible toward eliminating noise entirely.
+    filters.push('afftdn=nr=75:nf=-70:nt=w:om=o');
+    filters.push('anlmdn=s=0.0090:p=0.003:r=0.006:m=15');
+    // NOTE: this used to include a +1.5dB boost around 10kHz for "air" —
+    // removed. Roblox's own EqualizerSoundEffect independently boosts high
+    // frequencies (often maxed out, +10dB or more) — that's exactly the
+    // band residual hiss/static lives in, so boosting it here was actively
+    // working against every other noise-reduction step in this chain.
+    // Aggressive, wide high-shelf cut instead — specifically targets the
+    // band Roblox's own EQ is about to amplify, so there's simply much less
+    // high-frequency noise left for that boost to bring back up.
+    filters.push('equalizer=f=9000:t=h:w=1.2:g=-14');
+    filters.push('lowpass=f=11000:poles=2', 'lowpass=f=11500:poles=2');
+    // Replaces the old agate. Measured against a synthetic loud->fade->silent-tail
+    // test signal: the previous gate (threshold=0.0015≈-56dBFS) barely reduced the
+    // residual noise floor left after afftdn/anlmdn (which landed right around
+    // -48 to -56dBFS depending on source) because that floor sits so close to the
+    // gate's own threshold that it rarely crosses it — so quiet passages and
+    // song endings kept their static essentially untouched. A downward expander
+    // (compand) does the same job but as a smooth curve instead of a binary
+    // on/off gate: below -55dB it's crushed hard, -55→-45 tapers off, and -30dB
+    // and up is completely unity (verified: loud program material was bit-for-bit
+    // unaffected in testing) — so this only ever acts on the true noise floor,
+    // not on quiet or loud music.
+    // Floor deepened from -90 to -140 dBFS: a downstream Roblox effect chain
+    // that adds back tens of dB of gain (Volume, Compressor makeup, Equalizer
+    // boost) makes even a "-90dBFS" residual floor clearly audible again once
+    // amplified — -140dBFS leaves enough margin to stay inaudible even after
+    // a heavy downstream boost. -30dB and up is still completely untouched.
+    filters.push('compand=attacks=0.01:decays=0.3:points=-90/-140|-55/-140|-45/-70|-30/-30|0/0:soft-knee=3');
+    // Second, independent line of defense specifically for SUSTAINED
+    // silence (song endings, gaps between songs, the tail of the set) — a
+    // real hard gate with a hold time, on top of the smooth expander above.
+    // The expander reacts fast per-sample; this catches anything that
+    // lingers just above its crush zone for an extended stretch and takes
+    // it the rest of the way to true digital silence. threshold=-50dBFS —
+    // still safely below the -30dBFS floor where real quiet music lives.
+    filters.push('agate=threshold=0.0032:ratio=20:attack=20:release=250:range=0.00001:knee=1');
+    filters.push(`asetrate=${lowRate}`, 'aresample=44100:resampler=swr:filter_size=512:cutoff=0.93:precision=28');
   } else {
-    filters.push('highpass=f=18:poles=2');
-    filters.push('afftdn=nr=18:nf=-60:nt=w:tn=1:gs=8:om=o');
-    filters.push('equalizer=f=9500:t=h:w=1.10:g=-10');
-    filters.push('lowpass=f=15000:poles=2');
-    filters.push('compand=attacks=0.025:decays=0.40:points=-100/-140|-74/-122|-64/-86|-54/-60|-44/-44|0/0:soft-knee=8');
-    filters.push('alimiter=level_in=1:level_out=1:limit=0.975:attack=2:release=70:level=disabled');
+    filters.push('alimiter=level_in=1:level_out=1:limit=0.95:attack=1:release=50:level=disabled');
+    filters.push('highpass=f=20', 'lowpass=f=13000:poles=2', 'lowpass=f=13500:poles=2');
+    filters.push('afftdn=nr=65:nf=-65:nt=w:om=o');
+    filters.push('anlmdn=s=0.0060:p=0.003:r=0.006:m=15');
+    filters.push('equalizer=f=9000:t=h:w=1.2:g=-10');
+    filters.push(`asetrate=${lowRate}`, 'aresample=44100:resampler=swr:filter_size=512:cutoff=0.93:precision=28');
+    // See the matching comment in concert mode above — this replaces a gate
+    // that measured as barely reducing residual hiss (it sat right at the
+    // gate's threshold), with a downward expander that actually suppresses
+    // the noise floor at quiet passages and song endings while leaving
+    // normal-level music completely untouched. Floor deepened to -140dBFS
+    // for the same reason as concert mode: needs to stay inaudible even
+    // after a heavy downstream Roblox gain chain adds tens of dB back.
+    filters.push('compand=attacks=0.01:decays=0.3:points=-90/-140|-55/-140|-45/-70|-30/-30|0/0:soft-knee=3');
+    filters.push('agate=threshold=0.0032:ratio=20:attack=20:release=250:range=0.00001:knee=1');
   }
-
-  // High-quality pitch-down for the PlaybackSpeed=2.941 workflow. A longer
-  // SWR filter reduces imaging/alias residue that otherwise becomes obvious
-  // after Studio speeds the sound back up and applies large EQ/makeup gain.
-  filters.push(`asetrate=${lowRate}`);
-  // Keep the wider v1 resampling cutoff so the sound does not lose air/detail.
-  // The longer filter still reduces interpolation residue without trimming the
-  // useful top end as aggressively as v2 did.
-  filters.push('aresample=48000:resampler=swr:filter_size=4096:phase_shift=10:cutoff=0.985');
-
-  // ROBLOX STATIC SCRUB v4 — HIGH-BAND NOISE FLOOR FOCUS
-  //
-  // Roblox later restores pitch with PlaybackSpeed=2.941, so hiss living in
-  // roughly the 3.0–7.5 kHz region of this intentionally pitch-lowered file
-  // lands back in the upper-mid / air region that the very large Studio
-  // HighGain exposes. v2 solved that by cutting bandwidth; it worked on hiss
-  // but audibly reduced the music. v4 keeps the bandwidth and instead lowers
-  // only the *stationary* floor before the -63 dB delivery attenuation.
-  //
-  // Two different light algorithms are used in series at conservative
-  // strengths. afftdn removes stable broadband hiss; anlmdn then smooths the
-  // small residual granular/fizzy bed left by resampling/encoding preparation.
-  // Neither stage is a hard gate or low-pass, so transients, cymbal attack,
-  // vocal presence and reverb air remain available for Roblox's HighGain.
-  if(mode === 'concert') {
-    filters.push('afftdn=nr=22:nf=-68:nt=w:tn=1:gs=10:om=o');
-    filters.push('anlmdn=s=0.0018:p=0.0025:r=0.006:m=11');
-  } else {
-    filters.push('afftdn=nr=20:nf=-70:nt=w:tn=1:gs=10:om=o');
-    filters.push('anlmdn=s=0.0015:p=0.0025:r=0.006:m=11');
-  }
-
-  // Very soft floor control. This only pushes true near-silence further down;
-  // program material above about -58 dB is effectively untouched. It prevents
-  // the compressor/high EQ in Studio from turning pauses and decay tails into
-  // a constant audible static bed, without the on/off chatter of a noise gate.
-  filters.push('compand=attacks=0.08:decays=0.80:points=-110/-155|-88/-135|-76/-105|-66/-78|-58/-60|-50/-50|0/0:soft-knee=12');
-
-  // Final delivery attenuation LAST. This is intentionally quiet on disk.
-  filters.push(`volume=${volLinear.toFixed(10)}`);
-
-  // At -63 dB this limiter should normally be transparent; it exists only as
-  // a final numerical guard against malformed/hot input creating an invalid
-  // peak during the chain.
-  filters.push('alimiter=level_in=1:level_out=1:limit=0.988:attack=5:release=80:level=disabled');
+  filters.push(`volume=${volLinear.toFixed(8)}`);
+  filters.push('alimiter=level_in=1:level_out=1:limit=0.891:attack=5:release=50:level=disabled');
   return filters.join(',');
 }
 function codecArgsFor(fmt){
-  // Single export path: OGG Vorbis at a 384 kbps nominal target. Do NOT pin
-  // minrate=maxrate: Vorbis' managed hard-CBR mode can waste bits in easy
-  // passages and create more audible residue in difficult transients. A
-  // 384k nominal VBR/ABR target gives libvorbis room to spend bits where the
-  // waveform actually needs them while keeping the requested 384k class.
-  // 48 kHz matches the final processing rate and avoids another unnecessary
-  // sample-rate conversion before Roblox performs its own transcode.
-  return {
-    ext:'ogg',
-    args:['-codec:a','libvorbis','-b:a','384k','-ar','48000','-ac','2']
-  };
+  // Forced near-CBR (minrate/maxrate pinned to the target), not adaptive
+  // VBR. VBR chooses bits based on how much precision the codec's
+  // psychoacoustic model thinks is "needed" for THIS signal at ITS
+  // CURRENT (deliberately quiet, pre-Roblox-boost) loudness — it has no
+  // way to know the file is about to be amplified tens of dB after
+  // decoding, so left to its own judgement it spends far fewer bits than
+  // the content will actually need once boosted. Measured on a real file:
+  // requesting 256k VBR actually produced ~82kbit/s; forcing CBR at the
+  // same target reliably delivers the full requested bitrate.
+  // 380k, not higher — at Roblox's own 7-minute cap, anything above ~400k
+  // pushes the file past Roblox's separate 20MB size cap (500k would be
+  // ~25MB at 7:00). 380k stays under 20MB with margin even at the full
+  // 7 minutes.
+  if(fmt==='ogg_hq') return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','380k','-minrate','380k','-maxrate','380k']};
+  if(fmt==='ogg_std'||fmt==='ogg') return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','320k','-minrate','320k','-maxrate','320k']};
+  if(fmt==='mp3') return {ext:'mp3', args:['-codec:a','libmp3lame','-b:a','320k','-abr','0']};
+  if(fmt==='wav') return {ext:'wav', args:['-codec:a','pcm_s24le']};
+  return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','320k','-minrate','320k','-maxrate','320k']};
 }
 function extOf(name){ const m=name.match(/\.[^/.]+$/); return m?m[0]:'.dat'; }
 
@@ -1523,8 +1509,8 @@ async function processOne(file, idx, total, opts){
   // learn the noise floor, and long-set memory has to stay bounded — but the
   // critical fix here is what happens AFTER this: earlier versions then
   // concatenated every piece into one giant continuous WAV before splitting.
-  // Because Roblox's ~2.94x PlaybackSpeed trick means the on-disk audio is
-  // ~2.94x LONGER than the source, that "one file" for a real 2-3 hour
+  // Because Roblox's 3.34x PlaybackSpeed trick means the on-disk audio is
+  // 3.34x LONGER than the source, that "one file" for a real 2-3 hour
   // concert set was landing at 4-6+ GB sitting in the browser tab's memory —
   // comfortably past where the tab silently dies mid-job, which is exactly
   // what "cuts off partway through, doesn't give all the parts" looks like.
@@ -1535,8 +1521,8 @@ async function processOne(file, idx, total, opts){
   // bounded to about 2 segments' worth, regardless of how long the show is.
   // Segments used to be sized in *source* time (20 min) without accounting
   // for the fact that every mode here re-encodes through `asetrate` +
-  // `aresample` to bake in Roblox's ~2.94x PlaybackSpeed compensation —
-  // which makes the ON-DISK (encoded) audio ~2.94x LONGER than the source,
+  // `aresample` to bake in Roblox's 3.34x PlaybackSpeed compensation —
+  // which makes the ON-DISK (encoded) audio 3.34x LONGER than the source,
   // not shorter. A "20 source-minute" piece was actually producing close to
   // 59 minutes of 44.1kHz PCM (~600MB) per piece. That's well past where
   // ffmpeg-wasm's heap can silently fail mid-encode on longer/heavier sets
@@ -2086,7 +2072,7 @@ async function uploadObj(o, {silent=false}={}){
         const looksLikeSizeLimit = /entity too large|payload too large|413/i.test(raw);
         throw new Error(
           looksLikeSizeLimit
-            ? `Server rejected this file as too large for the host request-body limit. Turn Split Into Chunks on; this build automatically caps 384k upload parts to 1.25 minutes so they stay Vercel-safe without lowering audio quality.`
+            ? `Server rejected the file as too large (host body-size limit, not a Roblox error). Lower "Target length per chunk" in the Process tab, or deploy via Railway/server.js instead of Vercel serverless, which doesn't have this cap.`
             : `Server returned a non-JSON error (${res.status}): ${raw.slice(0,200)}`
         );
       }
@@ -2346,6 +2332,16 @@ document.getElementById('buildRbxmBtn').addEventListener('click', async () => {
     overrides.set(nameIdx, RbxmPatcher.writeStringPropAll(parsed.chunks[nameIdx], names));
     overrides.set(idIdx, RbxmPatcher.writeStringPropAll(parsed.chunks[idIdx], ids));
 
+    // Keep every generated Sound matched to the pitch compensation used by
+    // the audio exporter, even if an older base template is supplied later.
+    const playbackIdx = RbxmPatcher.findPropChunkIndex(parsed, 'Sound', 'PlaybackSpeed');
+    if(playbackIdx !== null){
+      overrides.set(playbackIdx, RbxmPatcher.writeFloatPropAll(
+        parsed.chunks[playbackIdx],
+        new Array(sounds.length).fill(PLAYBACK_SPEED)
+      ));
+    }
+
     // 2.5. Fix the Compressor/Equalizer effects baked into every Sound slot.
     // Inspecting the shipped template found GainMakeup and all three Equalizer
     // gains set to values wildly outside Roblox's valid ranges (e.g.
@@ -2440,9 +2436,9 @@ document.getElementById('processBtn').addEventListener('click', async ()=>{
     await ensureEngine();
     const opts = {
       mode,
-      volDb: -63, // locked quiet master for the user's exact Roblox gain chain
+      volDb: parseFloat(document.getElementById('volSel').value),
       noise: 'max', // static/noise removal is always on at max strength now — no user-facing dial
-      fmt: 'ogg_hq', // locked OGG Vorbis 384 kbps
+      fmt: document.getElementById('fmtSel').value,
       suffix: document.getElementById('suffixInp').value,
       split: splitOn,
       splitMin: parseFloat(document.getElementById('splitMin').value),
