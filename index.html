@@ -319,7 +319,7 @@
       <h3>Mode</h3>
       <div class="modes">
         <div class="mode-btn active" data-mode="song"><b>Song</b><span>Single track</span></div>
-        <div class="mode-btn" data-mode="concert"><b>Concert Set</b><span>Long set, gate + crowd handling</span></div>
+        <div class="mode-btn" data-mode="concert"><b>Concert Set</b><span>Long set, memory-safe splitting</span></div>
       </div>
     </div>
 
@@ -337,17 +337,6 @@
           </select>
           <div class="settings-note" style="margin-top:8px;">Exports default to −58 dB. Keep the Roblox Compressor/Equalizer gains controlled so they do not amplify the noise floor back into static.</div>
         </div>
-        <div class="field"><label>Static-Safe Pitching</label>
-          <div class="settings-note" style="margin-top:8px;">Uses a clean, high-precision pitch conversion. The heavy FFT denoise, nonlinear denoise, EQ cuts, expander, and gate that could create hiss or watery background artifacts have been removed.</div>
-        </div>
-        <div class="field"><label>Export Format</label>
-          <select id="fmtSel">
-            <option value="ogg_std" selected>OGG · 256k</option>
-            <option value="ogg_hq">OGG · 384k</option>
-            <option value="mp3">MP3 · V0</option>
-            <option value="wav">WAV (lossless)</option>
-          </select>
-        </div>
         <div class="field"><label>File Suffix</label>
           <input type="text" id="suffixInp" value="_rbx">
         </div>
@@ -357,11 +346,11 @@
         <div class="row-inline">
           <div class="switch on" id="splitSwitch"><div class="knob"></div></div>
           <span style="font-size:0.8rem; color:var(--text-dim);">Time per uploaded audio part (minutes) — keep under Roblox's per-file upload limit:</span>
-          <input type="number" id="splitMin" value="6.5" step="0.1" min="0.5" style="width:80px;">
+          <input type="number" id="splitMin" value="6.5" step="0.1" min="0.5" max="7" style="width:80px;">
         </div>
         <div class="settings-note" id="chunkSizeNote" style="margin-top:8px;"></div>
       </div>
-      <div class="note">Pitch and tempo are slowed to <b>0.2994×</b> on export. Set <b>Sound.PlaybackSpeed</b> to <b>3.34</b> in Roblox to restore the original pitch, tempo, and length. The companion player script and bundled Roblox model do this automatically.</div>
+      <div class="note">Uses a plain CapCut-style <b>0.3×</b> rate conversion with no pre-pitch denoise, gate, EQ, expander, limiter, or custom resampling stage. Export is fixed to <b>OGG Vorbis · 360 kbps</b>. Set <b>Sound.PlaybackSpeed</b> to <b>3.4</b> in Roblox.</div>
     </div>
 
     <div class="panel">
@@ -1108,9 +1097,10 @@
 import { FFmpeg } from "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js";
 import { toBlobURL, fetchFile } from "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js";
 
-// The export is slowed to the reciprocal of this value (about 0.2994x),
-// then Roblox restores the original pitch and tempo at PlaybackSpeed 3.34.
-const PLAYBACK_SPEED = 3.34;
+// Match the CapCut settings directly: export at 0.3x and play at 3.4x.
+const EXPORT_RATE = 0.3;
+const PLAYBACK_SPEED = 3.4;
+const OUTPUT_BITRATE_KBPS = 360;
 let ffmpeg = null;
 let ffmpegReady = false;
 let files = [];
@@ -1146,22 +1136,19 @@ autoUploadSwitch.addEventListener('click', ()=>{
 function updateChunkSizeNote(){
   const note = document.getElementById('chunkSizeNote');
   const splitMinEl = document.getElementById('splitMin');
-  const fmt = document.getElementById('fmtSel').value;
-  const bitrateKbps = {ogg_hq:384, ogg_std:256, ogg:256, mp3:190, wav:1411}[fmt] ?? 256;
   const splitMin = parseFloat(splitMinEl.value) || 0;
   const encodedSecs = splitMin*60; // target length IS the on-disk/uploaded-file duration per part
-  const estMB = (bitrateKbps*1000/8 * encodedSecs) / (1024*1024);
+  const estMB = (OUTPUT_BITRATE_KBPS*1000/8 * encodedSecs) / (1024*1024);
   const VERCEL_LIMIT_MB = 4.5;
   if(!splitOn){ note.textContent = ''; return; }
   const over = estMB > VERCEL_LIMIT_MB * 0.9;
-  note.innerHTML = `Estimated size per chunk: <b>${estMB.toFixed(1)} MB</b>` +
+  note.innerHTML = `Automatic OGG 360k export — estimated size per chunk: <b>${estMB.toFixed(1)} MiB</b>` +
     (over
       ? ` — this is close to or over Vercel's ~4.5MB serverless upload limit and will likely 413/crash the upload. Lower the chunk length, drop the bitrate, or deploy via Railway (server.js) instead, which doesn't have this cap.`
       : ` — comfortably under typical serverless (Vercel) upload limits.`);
   note.style.color = over ? 'var(--danger)' : 'var(--text-dim)';
 }
 ['splitMin'].forEach(id=> document.getElementById(id).addEventListener('input', updateChunkSizeNote));
-document.getElementById('fmtSel').addEventListener('change', updateChunkSizeNote);
 updateChunkSizeNote();
 
 dropzone.addEventListener('click', ()=> fileInput.click());
@@ -1363,42 +1350,18 @@ function parseDuration(o){ const m=o.match(/Duration:\s*(\d+):(\d+):([\d.]+)/); 
 function parseSampleRate(o){ const m=o.match(/(\d+)\s*Hz/); return m?parseInt(m[1]):44100; }
 function parseVolume(o){ const mean=o.match(/mean_volume:\s*(-?[\d.]+)/); const max=o.match(/max_volume:\s*(-?[\d.]+)/); return {mean:mean?parseFloat(mean[1]):null, max:max?parseFloat(max[1]):null}; }
 
-function buildFilterChain(mode, sr, volLinear, noiseReduction){
-  const lowRate = Math.round(sr / PLAYBACK_SPEED);
-  // Keep this deliberately close to a clean editor-style pitch conversion.
-  // The old chain stacked afftdn + anlmdn + EQ shelves + compand + agate.
-  // Those processors can synthesize "musical noise", chatter, and pumping
-  // that becomes obvious when Roblox speeds the file back up and downstream
-  // effects amplify it. Working in float, changing the interpreted sample
-  // rate, and doing one high-quality resample avoids adding that texture.
-  // Dither is disabled because the intermediate is Float32 and adding dither
-  // here would literally add a new noise floor before the -58 dB export gain.
-  return [
-    'aformat=sample_fmts=fltp',
-    `asetrate=${lowRate}`,
-    'aresample=44100:resampler=swr:filter_size=256:phase_shift=10:linear_interp=0:exact_rational=1:cutoff=0.97:precision=28:dither_method=none',
-    `volume=${volLinear.toFixed(8)}`
-  ].join(',');
+function buildFilterChain(sr, volLinear){
+  const lowRate = Math.round(sr * EXPORT_RATE);
+  // Intentionally minimal, matching the clean CapCut workflow as closely as
+  // ffmpeg can: reinterpret the rate, return to 44.1kHz with FFmpeg's normal
+  // resampler defaults, then apply the requested export attenuation. No
+  // denoise, gate, EQ, compressor, limiter, or custom resampler tuning.
+  return `asetrate=${lowRate},aresample=44100,volume=${volLinear.toFixed(8)}`;
 }
-function codecArgsFor(fmt){
-  // Forced near-CBR (minrate/maxrate pinned to the target), not adaptive
-  // VBR. VBR chooses bits based on how much precision the codec's
-  // psychoacoustic model thinks is "needed" for THIS signal at ITS
-  // CURRENT (deliberately quiet, pre-Roblox-boost) loudness — it has no
-  // way to know the file is about to be amplified tens of dB after
-  // decoding, so left to its own judgement it spends far fewer bits than
-  // the content will actually need once boosted. Measured on a real file:
-  // requesting 256k VBR actually produced ~82kbit/s; forcing CBR at the
-  // same target reliably delivers the full requested bitrate.
-  // 380k, not higher — at Roblox's own 7-minute cap, anything above ~400k
-  // pushes the file past Roblox's separate 20MB size cap (500k would be
-  // ~25MB at 7:00). 380k stays under 20MB with margin even at the full
-  // 7 minutes.
-  if(fmt==='ogg_hq') return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','380k','-minrate','380k','-maxrate','380k']};
-  if(fmt==='ogg_std'||fmt==='ogg') return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','320k','-minrate','320k','-maxrate','320k']};
-  if(fmt==='mp3') return {ext:'mp3', args:['-codec:a','libmp3lame','-b:a','320k','-abr','0']};
-  if(fmt==='wav') return {ext:'wav', args:['-codec:a','pcm_s24le']};
-  return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','320k','-minrate','320k','-maxrate','320k']};
+function codecArgsFor(){
+  // One fixed export: high-bitrate OGG Vorbis. 360 kbps keeps even a full
+  // 7-minute Roblox audio part below 20 MB with room for container overhead.
+  return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','360k','-minrate','360k','-maxrate','360k']};
 }
 function extOf(name){ const m=name.match(/\.[^/.]+$/); return m?m[0]:'.dat'; }
 
@@ -1445,8 +1408,8 @@ async function processOne(file, idx, total, opts){
   // compressed-seek-inaccuracy problem via a margin-and-re-seek trick.
 
   const volLinear = Math.pow(10, opts.volDb/20);
-  const chain = buildFilterChain(opts.mode, sr, volLinear, opts.noise);
-  const {ext, args: codecArgs} = codecArgsFor(opts.fmt);
+  const chain = buildFilterChain(sr, volLinear);
+  const {ext, args: codecArgs} = codecArgsFor();
   const baseName = file.name.replace(/\.[^/.]+$/, '') + opts.suffix;
   const outputs = [];
   const jobStart = performance.now();
@@ -1456,8 +1419,8 @@ async function processOne(file, idx, total, opts){
   // learn the noise floor, and long-set memory has to stay bounded — but the
   // critical fix here is what happens AFTER this: earlier versions then
   // concatenated every piece into one giant continuous WAV before splitting.
-  // Because Roblox's 3.34x PlaybackSpeed trick means the on-disk audio is
-  // 3.34x LONGER than the source, that "one file" for a real 2-3 hour
+  // Because the 0.3x export makes the on-disk audio about 3.33x LONGER than
+  // the source, that "one file" for a real 2-3 hour
   // concert set was landing at 4-6+ GB sitting in the browser tab's memory —
   // comfortably past where the tab silently dies mid-job, which is exactly
   // what "cuts off partway through, doesn't give all the parts" looks like.
@@ -1468,8 +1431,8 @@ async function processOne(file, idx, total, opts){
   // bounded to about 2 segments' worth, regardless of how long the show is.
   // Segments used to be sized in *source* time (20 min) without accounting
   // for the fact that every mode here re-encodes through `asetrate` +
-  // `aresample` to bake in Roblox's 3.34x PlaybackSpeed compensation —
-  // which makes the ON-DISK (encoded) audio 3.34x LONGER than the source,
+  // `aresample` to bake in the 0.3x export — which makes the ON-DISK
+  // (encoded) audio about 3.33x LONGER than the source,
   // not shorter. A "20 source-minute" piece was actually producing close to
   // 59 minutes of 44.1kHz PCM (~600MB) per piece. That's well past where
   // ffmpeg-wasm's heap can silently fail mid-encode on longer/heavier sets
@@ -1501,11 +1464,9 @@ async function processOne(file, idx, total, opts){
     // Source-time length that produces one target-length final part. The
     // target ("Target length per part") is measured in ON-DISK/uploaded-file
     // minutes (what Roblox's own per-file upload cap actually limits), and
-    // the on-disk file is PLAYBACK_SPEED times LONGER than the source-time
-    // cut that produced it (asetrate/aresample bakes in the pitch-down) —
-    // so the matching source-time length is the target divided by
-    // PLAYBACK_SPEED.
-    const chunkSecsForAlign = (opts.splitMin*60) / PLAYBACK_SPEED;
+    // the on-disk file is 1/EXPORT_RATE times LONGER than the source-time
+    // cut that produced it, so the matching source cut is target*EXPORT_RATE.
+    const chunkSecsForAlign = (opts.splitMin*60) * EXPORT_RATE;
     const chunksPerSegment = Math.max(1, Math.round(DESIRED_SEGMENT_SECS / chunkSecsForAlign));
     SAFETY_SEGMENT_SRC_SECS = chunksPerSegment * chunkSecsForAlign;
   }
@@ -1563,7 +1524,7 @@ async function processOne(file, idx, total, opts){
   if(numSafetySegs > 1){
     log(`Encoding ${numSafetySegs} piece(s) — kept small and processed/cleaned up one at a time so memory stays flat no matter how long the set is.`, 'header');
   } else {
-    log('Encoding (pitch shift + noise reduction chain)…', 'header');
+    log('Encoding (plain 0.3x pitch conversion)…', 'header');
   }
 
   // segMeta: [{name, start, dur}] — start/dur are in the ENCODED (post-pitch)
@@ -1643,13 +1604,14 @@ async function processOne(file, idx, total, opts){
   }
 
   const fullDur = cumulativeEncodedStart;
-  const fullDurAsSourceTime = fullDur / PLAYBACK_SPEED;
-  log(`   Duration on disk: ${fmtTime(fullDur)} (plays as ${fmtTime(fullDurAsSourceTime)} in Roblox)`, 'info');
-  if(srcDur && Math.abs(fullDurAsSourceTime - srcDur) > 2){
-    log(`   Note: the source file's own metadata said ${fmtTime(srcDur)}, but ${fmtTime(fullDurAsSourceTime)} of audio was ` +
+  const sourceEquivalentDur = fullDur * EXPORT_RATE;
+  const robloxDuration = fullDur / PLAYBACK_SPEED;
+  log(`   Duration on disk: ${fmtTime(fullDur)} (plays as ${fmtTime(robloxDuration)} in Roblox)`, 'info');
+  if(srcDur && Math.abs(sourceEquivalentDur - srcDur) > 2){
+    log(`   Note: the source file's own metadata said ${fmtTime(srcDur)}, but ${fmtTime(sourceEquivalentDur)} of audio was ` +
       `actually decoded — MP3 files (especially from phone/DJ-app recordings) can under- or over-report their ` +
       `own length in their header; the file was fully decoded to its real end rather than trusting that number, ` +
-      `so ${fmtTime(fullDurAsSourceTime)} is what's actually being used.`, 'warning');
+      `so ${fmtTime(sourceEquivalentDur)} is what's actually being used.`, 'warning');
   }
 
   // QC peak-level check, sampled from the first segment only — cheap, and a
@@ -2384,8 +2346,6 @@ document.getElementById('processBtn').addEventListener('click', async ()=>{
     const opts = {
       mode,
       volDb: parseFloat(document.getElementById('volSel').value),
-      noise: 'max', // static/noise removal is always on at max strength now — no user-facing dial
-      fmt: document.getElementById('fmtSel').value,
       suffix: document.getElementById('suffixInp').value,
       split: splitOn,
       splitMin: parseFloat(document.getElementById('splitMin').value),
