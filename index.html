@@ -330,7 +330,7 @@
           <select id="volSel">
             <option value="-63" selected>−63 dB · Roblox matched master</option>
           </select>
-          <div class="settings-note" style="margin-top:8px;">Locked quiet master for your Studio chain: Sound Volume 10 + PlaybackSpeed 2.941 + maxed Equalizer/Compressor behavior. Static Scrub v2 now removes post-resample HF image/fizz before the −63 dB delivery attenuation, while preserving the same useful top-end bandwidth you already liked.</div>
+          <div class="settings-note" style="margin-top:8px;">Locked quiet master for your Studio chain: Sound Volume 10 + PlaybackSpeed 2.941 + maxed Equalizer/Compressor behavior. Static Scrub v3 keeps the full v1 top-end and uses a light post-resample adaptive cleanup instead of cutting the highs, so Roblox has less fizz/static to amplify without making the music duller.</div>
         </div>
         <div class="field"><label>Noise / Static Removal</label>
           <div class="settings-note" style="margin-top:8px;">Always on at max strength — there's no dial anymore, every file gets the heaviest denoise chain automatically.</div>
@@ -1412,36 +1412,28 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
   // SWR filter reduces imaging/alias residue that otherwise becomes obvious
   // after Studio speeds the sound back up and applies large EQ/makeup gain.
   filters.push(`asetrate=${lowRate}`);
-  filters.push('aresample=48000:resampler=swr:filter_size=2048:phase_shift=10:cutoff=0.94');
+  // Keep the wider v1 resampling cutoff so the sound does not lose air/detail.
+  // The longer filter still reduces interpolation residue without trimming the
+  // useful top end as aggressively as v2 did.
+  filters.push('aresample=48000:resampler=swr:filter_size=2048:phase_shift=10:cutoff=0.97');
 
-  // ROBLOX STATIC SCRUB v2
+  // ROBLOX STATIC SCRUB v3
   //
-  // PlaybackSpeed=2.941 restores the pitch in Studio. That means the useful
-  // top end that survives our existing 14.5-15 kHz pre-filter only occupies
-  // roughly 4.9-5.1 kHz in the intentionally pitch-lowered export. Anything
-  // substantially above that after the SWR stage is not useful music for this
-  // workflow; it is mostly interpolation/image residue and codec-facing HF
-  // energy. Roblox's enormous HighGain can turn that residue into the audible
-  // fizzy/static layer the user is hearing.
+  // v2 used a post-resample low-pass. It reduced fizz, but it also reduced the
+  // audible top end after Roblox restored PlaybackSpeed=2.941. v3 keeps that
+  // bandwidth and instead performs a SECOND, light adaptive spectral cleanup
+  // after the pitch/resample stage. This is important because SWR + the later
+  // OGG encode can expose a new low-level noise bed that the huge Studio high
+  // boost makes obvious.
   //
-  // Remove ONLY that post-resample junk band. When Roblox speeds the file back
-  // up, 5.05/5.20 kHz maps back to about 14.85/15.29 kHz, matching the top-end
-  // bandwidth we already intentionally keep above. So this does not meaningfully
-  // reduce the current perceived quality; it just prevents useless HF residue
-  // from reaching Roblox's decoder/EQ.
+  // Keep this deliberately gentle: it tracks stationary hiss/fizz only. No
+  // post-resample low-pass and no second expander/gate, so cymbals, vocal air,
+  // reverb tails and transients stay much closer to the v1 sound.
   if(mode === 'concert') {
-    filters.push('equalizer=f=4550:t=h:w=0.75:g=-4');
-    filters.push('lowpass=f=5050:poles=2');
+    filters.push('afftdn=nr=12:nf=-72:nt=w:tn=1:gs=4:om=o');
   } else {
-    filters.push('equalizer=f=4700:t=h:w=0.75:g=-3');
-    filters.push('lowpass=f=5200:poles=2');
+    filters.push('afftdn=nr=10:nf=-74:nt=w:tn=1:gs=4:om=o');
   }
-
-  // A final *very gentle* floor expander runs while the signal is still at
-  // healthy internal level. It only acts on near-silence, so vocals, cymbals,
-  // reverb and transients stay intact while pauses no longer carry a bed of
-  // hiss that the Studio compressor/high EQ can magnify.
-  filters.push('compand=attacks=0.06:decays=0.70:points=-100/-150|-78/-128|-70/-98|-62/-72|-54/-55|0/0:soft-knee=10');
 
   // Final delivery attenuation LAST. This is intentionally quiet on disk.
   filters.push(`volume=${volLinear.toFixed(10)}`);
