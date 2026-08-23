@@ -350,7 +350,7 @@
         </div>
         <div class="settings-note" id="chunkSizeNote" style="margin-top:8px;"></div>
       </div>
-      <div class="note">Uses a plain CapCut-style <b>0.3×</b> rate conversion with no pre-pitch denoise, gate, EQ, expander, limiter, or custom resampling stage. Export is fixed to <b>OGG Vorbis · 360 kbps</b>. Set <b>Sound.PlaybackSpeed</b> to <b>3.4</b> in Roblox.</div>
+      <div class="note">Uses a plain CapCut-style <b>0.3×</b> rate conversion with no pre-pitch denoise, gate, EQ, expander, limiter, resampling, or lossy encoding. Export is fixed to <b>24-bit mono WAV</b> at the pitched-down sample rate so a full part stays below Roblox's size limit. Set <b>Sound.PlaybackSpeed</b> to <b>3.4</b> in Roblox.</div>
     </div>
 
     <div class="panel">
@@ -1100,7 +1100,9 @@ import { toBlobURL, fetchFile } from "https://cdn.jsdelivr.net/npm/@ffmpeg/util@
 // Match the CapCut settings directly: export at 0.3x and play at 3.4x.
 const EXPORT_RATE = 0.3;
 const PLAYBACK_SPEED = 3.4;
-const OUTPUT_BITRATE_KBPS = 360;
+const OUTPUT_BITS_PER_SAMPLE = 24;
+const OUTPUT_CHANNELS = 1;
+const MAX_SUPPORTED_SOURCE_RATE = 48000;
 let ffmpeg = null;
 let ffmpegReady = false;
 let files = [];
@@ -1138,11 +1140,14 @@ function updateChunkSizeNote(){
   const splitMinEl = document.getElementById('splitMin');
   const splitMin = parseFloat(splitMinEl.value) || 0;
   const encodedSecs = splitMin*60; // target length IS the on-disk/uploaded-file duration per part
-  const estMB = (OUTPUT_BITRATE_KBPS*1000/8 * encodedSecs) / (1024*1024);
+  // Worst-case size uses Roblox's maximum supported 48kHz source rate.
+  // The 0.3x rate becomes 14.4kHz; 24-bit mono PCM is then 345.6 kbps.
+  const worstCaseOutputRate = Math.round(MAX_SUPPORTED_SOURCE_RATE * EXPORT_RATE);
+  const estMB = (worstCaseOutputRate * OUTPUT_BITS_PER_SAMPLE * OUTPUT_CHANNELS / 8 * encodedSecs) / (1024*1024);
   const VERCEL_LIMIT_MB = 4.5;
   if(!splitOn){ note.textContent = ''; return; }
   const over = estMB > VERCEL_LIMIT_MB * 0.9;
-  note.innerHTML = `Automatic OGG 360k export — estimated size per chunk: <b>${estMB.toFixed(1)} MiB</b>` +
+  note.innerHTML = `Automatic lossless 24-bit mono WAV — worst-case size per chunk: <b>${estMB.toFixed(1)} MiB</b>` +
     (over
       ? ` — this is close to or over Vercel's ~4.5MB serverless upload limit and will likely 413/crash the upload. Lower the chunk length, drop the bitrate, or deploy via Railway (server.js) instead, which doesn't have this cap.`
       : ` — comfortably under typical serverless (Vercel) upload limits.`);
@@ -1352,16 +1357,17 @@ function parseVolume(o){ const mean=o.match(/mean_volume:\s*(-?[\d.]+)/); const 
 
 function buildFilterChain(sr, volLinear){
   const lowRate = Math.round(sr * EXPORT_RATE);
-  // Intentionally minimal, matching the clean CapCut workflow as closely as
-  // ffmpeg can: reinterpret the rate, return to 44.1kHz with FFmpeg's normal
-  // resampler defaults, then apply the requested export attenuation. No
-  // denoise, gate, EQ, compressor, limiter, or custom resampler tuning.
-  return `asetrate=${lowRate},aresample=44100,volume=${volLinear.toFixed(8)}`;
+  // Reinterpret the source rate and apply volume only. Keeping the WAV at
+  // this pitched-down rate means FFmpeg never invents interpolated samples,
+  // and PCM avoids the OGG/MP3 quantization texture that becomes obvious
+  // after a -58 dB file is amplified again in Roblox.
+  return `asetrate=${lowRate},volume=${volLinear.toFixed(8)}`;
 }
 function codecArgsFor(){
-  // One fixed export: high-bitrate OGG Vorbis. 360 kbps keeps even a full
-  // 7-minute Roblox audio part below 20 MB with room for container overhead.
-  return {ext:'ogg', args:['-codec:a','libvorbis','-b:a','360k','-minrate','360k','-maxrate','360k']};
+  // 24-bit mono PCM retains roughly 86 dB of usable resolution after a
+  // -58 dB attenuation. At the pitched-down sample rate it is also smaller
+  // than the previous 360 kbps OGG while removing one lossy generation.
+  return {ext:'wav', args:['-codec:a','pcm_s24le','-ac','1']};
 }
 function extOf(name){ const m=name.match(/\.[^/.]+$/); return m?m[0]:'.dat'; }
 
@@ -1409,6 +1415,7 @@ async function processOne(file, idx, total, opts){
 
   const volLinear = Math.pow(10, opts.volDb/20);
   const chain = buildFilterChain(sr, volLinear);
+  const outputSampleRate = Math.round(sr * EXPORT_RATE);
   const {ext, args: codecArgs} = codecArgsFor();
   const baseName = file.name.replace(/\.[^/.]+$/, '') + opts.suffix;
   const outputs = [];
@@ -1430,8 +1437,8 @@ async function processOne(file, idx, total, opts){
   // the moment nothing upcoming still needs them — so peak memory stays
   // bounded to about 2 segments' worth, regardless of how long the show is.
   // Segments used to be sized in *source* time (20 min) without accounting
-  // for the fact that every mode here re-encodes through `asetrate` +
-  // `aresample` to bake in the 0.3x export — which makes the ON-DISK
+  // for the fact that every mode here reinterprets the rate through
+  // `asetrate` to bake in the 0.3x export — which makes the ON-DISK
   // (encoded) audio about 3.33x LONGER than the source,
   // not shorter. A "20 source-minute" piece was actually producing close to
   // 59 minutes of 44.1kHz PCM (~600MB) per piece. That's well past where
@@ -1443,11 +1450,9 @@ async function processOne(file, idx, total, opts){
   // that budget doesn't depend on how long the whole set is, so a 50-minute
   // set and a 5-hour set are equally safe; there's just more (small) pieces.
   //
-  // NOTE on the ~8 min target below: measured on-disk segment duration comes
-  // out equal to the source cut length (the asetrate/aresample pitch trick
-  // doesn't actually change the file's own duration — PLAYBACK_SPEED only
-  // describes how Roblox plays it back later), so this is a straight
-  // source-time budget, no conversion needed.
+  // NOTE on the ~8 min target below: this is a source-time safety budget.
+  // The encoded PCM duration becomes roughly 1/EXPORT_RATE longer; final
+  // Roblox-sized parts are still cut in the encoded/on-disk time domain.
   //
   // When splitting into final Roblox-length chunks, segments are also
   // rounded up to a whole multiple of the chunk length. That means every
@@ -1560,7 +1565,7 @@ async function processOne(file, idx, total, opts){
         // quantization floor at any level used here, so nothing is lost
         // here — whatever precision loss happens, happens once, at the
         // final lossy encode step below, not twice.
-        const segArgs = ['-y', '-i', rawName, '-af', chain, '-ar', '44100', '-codec:a', 'pcm_f32le', partName];
+        const segArgs = ['-y', '-i', rawName, '-af', chain, '-ar', String(outputSampleRate), '-ac', '1', '-codec:a', 'pcm_f32le', partName];
         await ffrun(segArgs);
         clearLiveProgress();
         setBar('stageBar', (c+1)/numSafetySegs);
