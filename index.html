@@ -1371,7 +1371,7 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
     // become a real tradeoff — static in a Roblox concert set is worse
     // than a bit of a "processed" texture, so this leans as hard as
     // possible toward eliminating noise entirely.
-    filters.push('afftdn=nr=75:nf=-70:nt=w:om=o');
+    filters.push('afftdn=nr=75:nf=-70:rf=-80:nt=w:tn=1:gs=12:om=o');
     filters.push('anlmdn=s=0.0090:p=0.003:r=0.006:m=15');
     // NOTE: this used to include a +1.5dB boost around 10kHz for "air" —
     // removed. Roblox's own EqualizerSoundEffect independently boosts high
@@ -1409,13 +1409,23 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
     // still safely below the -30dBFS floor where real quiet music lives.
     filters.push('agate=threshold=0.0032:ratio=20:attack=20:release=250:range=0.00001:knee=1');
     filters.push(`asetrate=${lowRate}`, 'aresample=44100:resampler=swr:filter_size=512:cutoff=0.93:precision=28');
+    // Roblox Static Guard: the pitch/resample step can expose a tiny broadband
+    // floor that becomes obvious after Roblox applies its own transcode + large
+    // in-game gain/EQ.  This is deliberately a LIGHT cleanup pass: it tracks
+    // only the residual floor, smooths FFT gain changes to avoid fizzy/musical
+    // artifacts, and does not change the existing EQ/bass/volume curve.
+    filters.push('afftdn=nr=12:nf=-75:rf=-80:nt=w:tn=1:gs=8:om=o');
   } else {
     filters.push('alimiter=level_in=1:level_out=1:limit=0.95:attack=1:release=50:level=disabled');
     filters.push('highpass=f=20', 'lowpass=f=13000:poles=2', 'lowpass=f=13500:poles=2');
-    filters.push('afftdn=nr=65:nf=-65:nt=w:om=o');
+    filters.push('afftdn=nr=65:nf=-65:rf=-80:nt=w:tn=1:gs=12:om=o');
     filters.push('anlmdn=s=0.0060:p=0.003:r=0.006:m=15');
     filters.push('equalizer=f=9000:t=h:w=1.2:g=-10');
     filters.push(`asetrate=${lowRate}`, 'aresample=44100:resampler=swr:filter_size=512:cutoff=0.93:precision=28');
+    // Same light post-resample cleanup as Concert mode.  Keeping it after
+    // resampling is important: it catches the floor that would otherwise be
+    // magnified by Roblox without touching the existing tonal settings.
+    filters.push('afftdn=nr=12:nf=-75:rf=-80:nt=w:tn=1:gs=8:om=o');
     // See the matching comment in concert mode above — this replaces a gate
     // that measured as barely reducing residual hiss (it sat right at the
     // gate's threshold), with a downward expander that actually suppresses
