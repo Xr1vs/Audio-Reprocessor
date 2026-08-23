@@ -328,9 +328,9 @@
       <div class="grid">
         <div class="field"><label>Output Volume</label>
           <select id="volSel">
-            <option value="-63" selected>−63 dB · Roblox matched master</option>
+            <option value="-58" selected>−58 dB · Roblox matched master</option>
           </select>
-          <div class="settings-note" style="margin-top:8px;">Locked quiet master for your Studio chain: Sound Volume 10 + PlaybackSpeed 2.941 + maxed Equalizer/Compressor behavior. Static Scrub v3 keeps the full v1 top-end and uses a light post-resample adaptive cleanup instead of cutting the highs, so Roblox has less fizz/static to amplify without making the music duller.</div>
+          <div class="settings-note" style="margin-top:8px;">Locked quiet master for your Studio chain: Sound Volume 10 + PlaybackSpeed 3.333333 + your existing Equalizer/Compressor behavior. The master is now −58 dB so Roblox starts with a 5 dB stronger signal before its extreme HighGain exposes the noise floor. Static Scrub v5 preserves the audible band while removing out-of-band residue after the 0.300× pitch-down.</div>
         </div>
         <div class="field"><label>Noise / Static Removal</label>
           <div class="settings-note" style="margin-top:8px;">Always on at max strength — there's no dial anymore, every file gets the heaviest denoise chain automatically.</div>
@@ -354,7 +354,7 @@
         </div>
         <div class="settings-note" id="chunkSizeNote" style="margin-top:8px;"></div>
       </div>
-      <div class="note">Pitch is shifted down <b>2.941×</b> on export, which is why the audio takes longer to upload/play back on disk than it does once Roblox plays it — set <b>Sound.PlaybackSpeed</b> to <b>2.941</b> in Roblox to restore the original pitch and length. The companion player script does this automatically.</div>
+      <div class="note">Export pitch/speed is <b>0.300×</b>. Set <b>Sound.PlaybackSpeed</b> to <b>3.333333</b> in Roblox Studio to restore the original pitch and length (1 ÷ 0.300 = 3.333333).</div>
     </div>
 
     <div class="panel">
@@ -1101,7 +1101,8 @@
 import { FFmpeg } from "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js";
 import { toBlobURL, fetchFile } from "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js";
 
-const PLAYBACK_SPEED = 2.941;
+const PITCH_FACTOR = 0.300;
+const PLAYBACK_SPEED = 1 / PITCH_FACTOR; // 3.333333... in Roblox restores normal pitch
 let ffmpeg = null;
 let ffmpegReady = false;
 let files = [];
@@ -1369,11 +1370,11 @@ function parseSampleRate(o){ const m=o.match(/(\d+)\s*Hz/); return m?parseInt(m[
 function parseVolume(o){ const mean=o.match(/mean_volume:\s*(-?[\d.]+)/); const max=o.match(/max_volume:\s*(-?[\d.]+)/); return {mean:mean?parseFloat(mean[1]):null, max:max?parseFloat(max[1]):null}; }
 
 function buildFilterChain(mode, sr, volLinear, noiseReduction){
-  const lowRate = Math.max(8000, Math.round(sr / PLAYBACK_SPEED));
+  const lowRate = Math.max(8000, Math.round(sr * PITCH_FACTOR));
   const filters = ['aformat=sample_fmts=fltp'];
 
   // IMPORTANT: all cleanup is performed while the music is still at its
-  // normal internal level. The very last gain stage is the -63 dB Roblox
+  // normal internal level. The very last gain stage is the -58 dB Roblox
   // delivery attenuation. That keeps the denoisers/filters working on a
   // healthy signal instead of asking them to process an already microscopic
   // waveform and then having Studio magnify their residue by ~60 dB.
@@ -1408,7 +1409,7 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
     filters.push('alimiter=level_in=1:level_out=1:limit=0.975:attack=2:release=70:level=disabled');
   }
 
-  // High-quality pitch-down for the PlaybackSpeed=2.941 workflow. A longer
+  // High-quality 0.300x pitch-down for the PlaybackSpeed=3.333333 workflow. A longer
   // SWR filter reduces imaging/alias residue that otherwise becomes obvious
   // after Studio speeds the sound back up and applies large EQ/makeup gain.
   filters.push(`asetrate=${lowRate}`);
@@ -1419,12 +1420,12 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
 
   // ROBLOX STATIC SCRUB v4 — HIGH-BAND NOISE FLOOR FOCUS
   //
-  // Roblox later restores pitch with PlaybackSpeed=2.941, so hiss living in
+  // Roblox later restores pitch with PlaybackSpeed=3.333333, so hiss living in
   // roughly the 3.0–7.5 kHz region of this intentionally pitch-lowered file
   // lands back in the upper-mid / air region that the very large Studio
   // HighGain exposes. v2 solved that by cutting bandwidth; it worked on hiss
   // but audibly reduced the music. v4 keeps the bandwidth and instead lowers
-  // only the *stationary* floor before the -63 dB delivery attenuation.
+  // only the *stationary* floor before the -58 dB delivery attenuation.
   //
   // Two different light algorithms are used in series at conservative
   // strengths. afftdn removes stable broadband hiss; anlmdn then smooths the
@@ -1445,10 +1446,19 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
   // a constant audible static bed, without the on/off chatter of a noise gate.
   filters.push('compand=attacks=0.08:decays=0.80:points=-110/-155|-88/-135|-76/-105|-66/-78|-58/-60|-50/-50|0/0:soft-knee=12');
 
+  // STATIC SCRUB v5: after a 0.300x pitch-down, the entire normal 0–20 kHz
+  // audible band occupies only 0–6 kHz in the exported file. Anything above
+  // about 6 kHz cannot become useful audible content when Roblox speeds the
+  // file back up by 3.333333; it is interpolation/codec residue that the huge
+  // Studio HighGain can turn into hiss. Remove only that out-of-band residue.
+  // This is deliberately AFTER the pitch conversion, so unlike the older v2
+  // cutoff it does not remove the original song's audible top end.
+  filters.push('lowpass=f=6000:poles=3');
+
   // Final delivery attenuation LAST. This is intentionally quiet on disk.
   filters.push(`volume=${volLinear.toFixed(10)}`);
 
-  // At -63 dB this limiter should normally be transparent; it exists only as
+  // At -58 dB this limiter should normally be transparent; it exists only as
   // a final numerical guard against malformed/hot input creating an invalid
   // peak during the chain.
   filters.push('alimiter=level_in=1:level_out=1:limit=0.988:attack=5:release=80:level=disabled');
@@ -1523,8 +1533,8 @@ async function processOne(file, idx, total, opts){
   // learn the noise floor, and long-set memory has to stay bounded — but the
   // critical fix here is what happens AFTER this: earlier versions then
   // concatenated every piece into one giant continuous WAV before splitting.
-  // Because Roblox's ~2.94x PlaybackSpeed trick means the on-disk audio is
-  // ~2.94x LONGER than the source, that "one file" for a real 2-3 hour
+  // Because Roblox's ~3.333x PlaybackSpeed trick means the on-disk audio is
+  // ~3.333x LONGER than the source, that "one file" for a real 2-3 hour
   // concert set was landing at 4-6+ GB sitting in the browser tab's memory —
   // comfortably past where the tab silently dies mid-job, which is exactly
   // what "cuts off partway through, doesn't give all the parts" looks like.
@@ -1535,8 +1545,8 @@ async function processOne(file, idx, total, opts){
   // bounded to about 2 segments' worth, regardless of how long the show is.
   // Segments used to be sized in *source* time (20 min) without accounting
   // for the fact that every mode here re-encodes through `asetrate` +
-  // `aresample` to bake in Roblox's ~2.94x PlaybackSpeed compensation —
-  // which makes the ON-DISK (encoded) audio ~2.94x LONGER than the source,
+  // `aresample` to bake in Roblox's ~3.333x PlaybackSpeed compensation —
+  // which makes the ON-DISK (encoded) audio ~3.333x LONGER than the source,
   // not shorter. A "20 source-minute" piece was actually producing close to
   // 59 minutes of 44.1kHz PCM (~600MB) per piece. That's well past where
   // ffmpeg-wasm's heap can silently fail mid-encode on longer/heavier sets
@@ -2440,7 +2450,7 @@ document.getElementById('processBtn').addEventListener('click', async ()=>{
     await ensureEngine();
     const opts = {
       mode,
-      volDb: -63, // locked quiet master for the user's exact Roblox gain chain
+      volDb: -58, // stronger quiet master: 5 dB more signal before Roblox HighGain
       noise: 'max', // static/noise removal is always on at max strength now — no user-facing dial
       fmt: 'ogg_hq', // locked OGG Vorbis 384 kbps
       suffix: document.getElementById('suffixInp').value,
