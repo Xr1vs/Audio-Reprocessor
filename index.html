@@ -337,8 +337,8 @@
           </select>
           <div class="settings-note" style="margin-top:8px;">Exports default to −58 dB. Keep the Roblox Compressor/Equalizer gains controlled so they do not amplify the noise floor back into static.</div>
         </div>
-        <div class="field"><label>Noise / Static Removal</label>
-          <div class="settings-note" style="margin-top:8px;">Always on at max strength — there's no dial anymore, every file gets the heaviest denoise chain automatically.</div>
+        <div class="field"><label>Static-Safe Pitching</label>
+          <div class="settings-note" style="margin-top:8px;">Uses a clean, high-precision pitch conversion. The heavy FFT denoise, nonlinear denoise, EQ cuts, expander, and gate that could create hiss or watery background artifacts have been removed.</div>
         </div>
         <div class="field"><label>Export Format</label>
           <select id="fmtSel">
@@ -1365,73 +1365,20 @@ function parseVolume(o){ const mean=o.match(/mean_volume:\s*(-?[\d.]+)/); const 
 
 function buildFilterChain(mode, sr, volLinear, noiseReduction){
   const lowRate = Math.round(sr / PLAYBACK_SPEED);
-  let filters = ['aformat=sample_fmts=fltp'];
-  if(mode === 'concert'){
-    filters.push('alimiter=level_in=1:level_out=1:limit=0.80:attack=0.5:release=30:level=disabled');
-    filters.push('highpass=f=40:poles=2', 'highpass=f=20:poles=1');
-    // Pushed hard, deliberately past the point where "musical noise" (a
-    // warbly artifact from over-aggressive spectral denoise) starts to
-    // become a real tradeoff — static in a Roblox concert set is worse
-    // than a bit of a "processed" texture, so this leans as hard as
-    // possible toward eliminating noise entirely.
-    filters.push('afftdn=nr=75:nf=-70:nt=w:om=o');
-    filters.push('anlmdn=s=0.0090:p=0.003:r=0.006:m=15');
-    // NOTE: this used to include a +1.5dB boost around 10kHz for "air" —
-    // removed. Roblox's own EqualizerSoundEffect independently boosts high
-    // frequencies (often maxed out, +10dB or more) — that's exactly the
-    // band residual hiss/static lives in, so boosting it here was actively
-    // working against every other noise-reduction step in this chain.
-    // Aggressive, wide high-shelf cut instead — specifically targets the
-    // band Roblox's own EQ is about to amplify, so there's simply much less
-    // high-frequency noise left for that boost to bring back up.
-    filters.push('equalizer=f=9000:t=h:w=1.2:g=-14');
-    filters.push('lowpass=f=11000:poles=2', 'lowpass=f=11500:poles=2');
-    // Replaces the old agate. Measured against a synthetic loud->fade->silent-tail
-    // test signal: the previous gate (threshold=0.0015≈-56dBFS) barely reduced the
-    // residual noise floor left after afftdn/anlmdn (which landed right around
-    // -48 to -56dBFS depending on source) because that floor sits so close to the
-    // gate's own threshold that it rarely crosses it — so quiet passages and
-    // song endings kept their static essentially untouched. A downward expander
-    // (compand) does the same job but as a smooth curve instead of a binary
-    // on/off gate: below -55dB it's crushed hard, -55→-45 tapers off, and -30dB
-    // and up is completely unity (verified: loud program material was bit-for-bit
-    // unaffected in testing) — so this only ever acts on the true noise floor,
-    // not on quiet or loud music.
-    // Floor deepened from -90 to -140 dBFS: a downstream Roblox effect chain
-    // that adds back tens of dB of gain (Volume, Compressor makeup, Equalizer
-    // boost) makes even a "-90dBFS" residual floor clearly audible again once
-    // amplified — -140dBFS leaves enough margin to stay inaudible even after
-    // a heavy downstream boost. -30dB and up is still completely untouched.
-    filters.push('compand=attacks=0.01:decays=0.3:points=-90/-140|-55/-140|-45/-70|-30/-30|0/0:soft-knee=3');
-    // Second, independent line of defense specifically for SUSTAINED
-    // silence (song endings, gaps between songs, the tail of the set) — a
-    // real hard gate with a hold time, on top of the smooth expander above.
-    // The expander reacts fast per-sample; this catches anything that
-    // lingers just above its crush zone for an extended stretch and takes
-    // it the rest of the way to true digital silence. threshold=-50dBFS —
-    // still safely below the -30dBFS floor where real quiet music lives.
-    filters.push('agate=threshold=0.0032:ratio=20:attack=20:release=250:range=0.00001:knee=1');
-    filters.push(`asetrate=${lowRate}`, 'aresample=44100:resampler=swr:filter_size=512:cutoff=0.93:precision=28');
-  } else {
-    filters.push('alimiter=level_in=1:level_out=1:limit=0.95:attack=1:release=50:level=disabled');
-    filters.push('highpass=f=20', 'lowpass=f=13000:poles=2', 'lowpass=f=13500:poles=2');
-    filters.push('afftdn=nr=65:nf=-65:nt=w:om=o');
-    filters.push('anlmdn=s=0.0060:p=0.003:r=0.006:m=15');
-    filters.push('equalizer=f=9000:t=h:w=1.2:g=-10');
-    filters.push(`asetrate=${lowRate}`, 'aresample=44100:resampler=swr:filter_size=512:cutoff=0.93:precision=28');
-    // See the matching comment in concert mode above — this replaces a gate
-    // that measured as barely reducing residual hiss (it sat right at the
-    // gate's threshold), with a downward expander that actually suppresses
-    // the noise floor at quiet passages and song endings while leaving
-    // normal-level music completely untouched. Floor deepened to -140dBFS
-    // for the same reason as concert mode: needs to stay inaudible even
-    // after a heavy downstream Roblox gain chain adds tens of dB back.
-    filters.push('compand=attacks=0.01:decays=0.3:points=-90/-140|-55/-140|-45/-70|-30/-30|0/0:soft-knee=3');
-    filters.push('agate=threshold=0.0032:ratio=20:attack=20:release=250:range=0.00001:knee=1');
-  }
-  filters.push(`volume=${volLinear.toFixed(8)}`);
-  filters.push('alimiter=level_in=1:level_out=1:limit=0.891:attack=5:release=50:level=disabled');
-  return filters.join(',');
+  // Keep this deliberately close to a clean editor-style pitch conversion.
+  // The old chain stacked afftdn + anlmdn + EQ shelves + compand + agate.
+  // Those processors can synthesize "musical noise", chatter, and pumping
+  // that becomes obvious when Roblox speeds the file back up and downstream
+  // effects amplify it. Working in float, changing the interpreted sample
+  // rate, and doing one high-quality resample avoids adding that texture.
+  // Dither is disabled because the intermediate is Float32 and adding dither
+  // here would literally add a new noise floor before the -58 dB export gain.
+  return [
+    'aformat=sample_fmts=fltp',
+    `asetrate=${lowRate}`,
+    'aresample=44100:resampler=swr:filter_size=256:phase_shift=10:linear_interp=0:exact_rational=1:cutoff=0.97:precision=28:dither_method=none',
+    `volume=${volLinear.toFixed(8)}`
+  ].join(',');
 }
 function codecArgsFor(fmt){
   // Forced near-CBR (minrate/maxrate pinned to the target), not adaptive
