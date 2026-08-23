@@ -1364,7 +1364,7 @@ function setLiveProgress(durationSecs, label){
 }
 function clearLiveProgress(){ liveProgress = null; }
 
-async function ffrun(args){ window.__lastFF=''; await ffmpeg.exec(args); return window.__lastFF; }
+async function ffrun(args){ window.__lastFF=''; const rc = await ffmpeg.exec(args); if(rc !== 0){ throw new Error(`FFmpeg exited with code ${rc}${window.__lastFF ? ': ' + window.__lastFF.slice(-1200) : ''}`); } return window.__lastFF; }
 function parseDuration(o){ const m=o.match(/Duration:\s*(\d+):(\d+):([\d.]+)/); return m?(+m[1])*3600+(+m[2])*60+parseFloat(m[3]):null; }
 function parseSampleRate(o){ const m=o.match(/(\d+)\s*Hz/); return m?parseInt(m[1]):44100; }
 function parseVolume(o){ const mean=o.match(/mean_volume:\s*(-?[\d.]+)/); const max=o.match(/max_volume:\s*(-?[\d.]+)/); return {mean:mean?parseFloat(mean[1]):null, max:max?parseFloat(max[1]):null}; }
@@ -1557,11 +1557,9 @@ async function processOne(file, idx, total, opts){
   // that budget doesn't depend on how long the whole set is, so a 50-minute
   // set and a 5-hour set are equally safe; there's just more (small) pieces.
   //
-  // NOTE on the ~8 min target below: measured on-disk segment duration comes
-  // out equal to the source cut length (the asetrate/aresample pitch trick
-  // doesn't actually change the file's own duration — PLAYBACK_SPEED only
-  // describes how Roblox plays it back later), so this is a straight
-  // source-time budget, no conversion needed.
+  // At PITCH_FACTOR=0.300, each source second becomes about 3.333 seconds in
+  // the intermediate/output time domain. Keep source pieces short so float32
+  // intermediates remain comfortably within ffmpeg.wasm/browser memory.
   //
   // When splitting into final Roblox-length chunks, segments are also
   // rounded up to a whole multiple of the chunk length. That means every
@@ -1571,8 +1569,8 @@ async function processOne(file, idx, total, opts){
   // deep into a long run). It also means far fewer, larger ffmpeg calls
   // instead of extra subclip+concat work for every other chunk, which is
   // most of where the extra time was going.
-  const DESIRED_SEGMENT_SECS = 8 * 60; // ~8 min per piece — safe headroom on basically any device
-  const SAFETY_TRIGGER_SRC_SECS = 12 * 60; // below this, one pass is already well within safe memory — no need to chunk at all
+  const DESIRED_SEGMENT_SECS = 90; // 90 source-seconds -> ~5 min encoded at 0.300x; keeps float32 intermediates safely bounded
+  const SAFETY_TRIGGER_SRC_SECS = 60; // 0.300x expands duration 3.333x, so even normal songs are internally segmented to avoid ffmpeg.wasm heap failures
   let SAFETY_SEGMENT_SRC_SECS = DESIRED_SEGMENT_SECS;
   if(opts.split){
     // Source-time length that produces one target-length final part. The
@@ -1676,7 +1674,7 @@ async function processOne(file, idx, total, opts){
         // quantization floor at any level used here, so nothing is lost
         // here — whatever precision loss happens, happens once, at the
         // final lossy encode step below, not twice.
-        const segArgs = ['-y', '-i', rawName, '-af', chain, '-ar', '44100', '-codec:a', 'pcm_f32le', partName];
+        const segArgs = ['-y', '-i', rawName, '-af', chain, '-ar', '48000', '-codec:a', 'pcm_f32le', partName];
         await ffrun(segArgs);
         clearLiveProgress();
         setBar('stageBar', (c+1)/numSafetySegs);
