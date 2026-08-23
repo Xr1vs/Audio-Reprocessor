@@ -1453,7 +1453,7 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
   // Studio HighGain can turn into hiss. Remove only that out-of-band residue.
   // This is deliberately AFTER the pitch conversion, so unlike the older v2
   // cutoff it does not remove the original song's audible top end.
-  filters.push('lowpass=f=6000:poles=3');
+  filters.push('lowpass=f=6000:poles=2');
 
   // Final delivery attenuation LAST. This is intentionally quiet on disk.
   filters.push(`volume=${volLinear.toFixed(10)}`);
