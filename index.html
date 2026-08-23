@@ -1415,25 +1415,35 @@ function buildFilterChain(mode, sr, volLinear, noiseReduction){
   // Keep the wider v1 resampling cutoff so the sound does not lose air/detail.
   // The longer filter still reduces interpolation residue without trimming the
   // useful top end as aggressively as v2 did.
-  filters.push('aresample=48000:resampler=swr:filter_size=2048:phase_shift=10:cutoff=0.97');
+  filters.push('aresample=48000:resampler=swr:filter_size=4096:phase_shift=10:cutoff=0.985');
 
-  // ROBLOX STATIC SCRUB v3
+  // ROBLOX STATIC SCRUB v4 — HIGH-BAND NOISE FLOOR FOCUS
   //
-  // v2 used a post-resample low-pass. It reduced fizz, but it also reduced the
-  // audible top end after Roblox restored PlaybackSpeed=2.941. v3 keeps that
-  // bandwidth and instead performs a SECOND, light adaptive spectral cleanup
-  // after the pitch/resample stage. This is important because SWR + the later
-  // OGG encode can expose a new low-level noise bed that the huge Studio high
-  // boost makes obvious.
+  // Roblox later restores pitch with PlaybackSpeed=2.941, so hiss living in
+  // roughly the 3.0–7.5 kHz region of this intentionally pitch-lowered file
+  // lands back in the upper-mid / air region that the very large Studio
+  // HighGain exposes. v2 solved that by cutting bandwidth; it worked on hiss
+  // but audibly reduced the music. v4 keeps the bandwidth and instead lowers
+  // only the *stationary* floor before the -63 dB delivery attenuation.
   //
-  // Keep this deliberately gentle: it tracks stationary hiss/fizz only. No
-  // post-resample low-pass and no second expander/gate, so cymbals, vocal air,
-  // reverb tails and transients stay much closer to the v1 sound.
+  // Two different light algorithms are used in series at conservative
+  // strengths. afftdn removes stable broadband hiss; anlmdn then smooths the
+  // small residual granular/fizzy bed left by resampling/encoding preparation.
+  // Neither stage is a hard gate or low-pass, so transients, cymbal attack,
+  // vocal presence and reverb air remain available for Roblox's HighGain.
   if(mode === 'concert') {
-    filters.push('afftdn=nr=12:nf=-72:nt=w:tn=1:gs=4:om=o');
+    filters.push('afftdn=nr=22:nf=-68:nt=w:tn=1:gs=10:om=o');
+    filters.push('anlmdn=s=0.0018:p=0.0025:r=0.006:m=11');
   } else {
-    filters.push('afftdn=nr=10:nf=-74:nt=w:tn=1:gs=4:om=o');
+    filters.push('afftdn=nr=20:nf=-70:nt=w:tn=1:gs=10:om=o');
+    filters.push('anlmdn=s=0.0015:p=0.0025:r=0.006:m=11');
   }
+
+  // Very soft floor control. This only pushes true near-silence further down;
+  // program material above about -58 dB is effectively untouched. It prevents
+  // the compressor/high EQ in Studio from turning pauses and decay tails into
+  // a constant audible static bed, without the on/off chatter of a noise gate.
+  filters.push('compand=attacks=0.08:decays=0.80:points=-110/-155|-88/-135|-76/-105|-66/-78|-58/-60|-50/-50|0/0:soft-knee=12');
 
   // Final delivery attenuation LAST. This is intentionally quiet on disk.
   filters.push(`volume=${volLinear.toFixed(10)}`);
