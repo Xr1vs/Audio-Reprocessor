@@ -1663,7 +1663,7 @@ async function processOne(file, idx, total, opts){
     let segOk = false;
     for(let attempt=0; attempt<2 && !segOk; attempt++){
       try{
-        setLiveProgress(SAFETY_SEGMENT_SRC_SECS, label);
+        setLiveProgress(SAFETY_SEGMENT_SRC_SECS / 0.300, label);
         const segStartT = performance.now();
 
         // Decode this one small piece start-to-finish — no seeking needed,
@@ -1683,7 +1683,10 @@ async function processOne(file, idx, total, opts){
         clearLiveProgress();
         setBar('stageBar', (c+1)/numSafetySegs);
 
-        const segDurOut = await ffrun(['-i', partName]);
+        // Probe the encoded WAV with a null output. A bare `-i partName`
+        // exits FFmpeg with code 1 ("At least one output file must be specified"),
+        // which the strict runner correctly treats as an error even though the WAV is valid.
+        const segDurOut = await ffrun(['-hide_banner','-i', partName, '-t','0','-f','null','-']);
         const segEncodedDur = parseDuration(segDurOut) || 0;
         if(segEncodedDur < 0.1){
           throw new Error('piece decoded to (near-)zero length — likely a corrupted/failed decode');
