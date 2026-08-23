@@ -1502,7 +1502,11 @@ async function processOne(file, idx, total, opts){
   log(`${'='.repeat(40)}`, 'separator');
   setStatus(`(${idx+1}/${total}) Probing: ${file.name}`);
   log('Reading file info…', 'header');
-  const probeOut = await ffrun(['-i', inName]);
+  // Probe through a zero-duration null output so FFmpeg exits cleanly (code 0).
+  // Calling only `-i file` intentionally exits code 1 with "At least one output
+  // file must be specified", which the strict ffrun wrapper correctly treats
+  // as a failure even though the input itself decoded/probed successfully.
+  const probeOut = await ffrun(['-hide_banner','-i', inName, '-t','0','-f','null','-']);
   const sr = parseSampleRate(probeOut);
   let srcDur = parseDuration(probeOut) || 0;
   log(`   Sample rate: ${sr}Hz — Duration: ${srcDur ? fmtTime(srcDur) : 'unknown'}`, 'info');
